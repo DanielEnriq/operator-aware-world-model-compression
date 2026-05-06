@@ -24,3 +24,4 @@ mlruns/
 *.h5
 *.hdf5
 .swm_cache/
+external/
