@@ -1,9 +1,22 @@
 [project]
 name = "operator-aware-world-model-compression"
 version = "0.1.0"
-description = "Add your description here"
+description = "Operator-aware compression for world models."
 readme = "README.md"
 requires-python = ">=3.10,<3.12"
 dependencies = [
-    "stable-worldmodel>=0.0.6",
+    "stable-worldmodel",
+    "numpy",
+    "tqdm",
+    "pymunk",
+    "pygame",
+    "opencv-python-headless",
+    "shapely",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=65.5.0", "wheel"]
+build-backend = "setuptools.build_meta"
