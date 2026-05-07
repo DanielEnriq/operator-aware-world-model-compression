@@ -66,6 +66,13 @@ def summarize(run_name: str) -> None:
         transition_path = results_dir / f"lewm_transition_metrics_{tag}_norm_actions.json"
         ranking_path = method_dir / "ranking_eval.json"
 
+        # Some ranking evals for phase3/distilled models were saved under phase2
+        # because the ranking script writes to OUTPUT_ROOT/phase2/run/tag.
+        if not ranking_path.exists():
+            fallback_ranking_path = OUTPUT_ROOT / "phase2" / cfg.run_name / tag / "ranking_eval.json"
+            if fallback_ranking_path.exists():
+                ranking_path = fallback_ranking_path
+
         if not meta_path.exists() or not transition_path.exists():
             return
 
