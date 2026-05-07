@@ -92,7 +92,11 @@ os.environ["STABLEWM_HOME"] = f"{os.getcwd()}/.swm_cache"
 !uv run python scripts/inspect_trained_checkpoints.py --root /content/drive/MyDrive/oawc_checkpoints
 ```
 
-## 11) Benchmark
+## 11) Official LeWM benchmark / installed-SWM-compatible checkpoints only
+
+Use this step for official LeWM comparisons (installed-SWM lane) and
+checkpoints that are compatible with `scripts/benchmark_cost_model.py`.
+For source-trained PreJEPA checkpoints, use Step 12 instead.
 
 ```bash
 !uv run python scripts/benchmark_cost_model.py \
@@ -106,6 +110,9 @@ os.environ["STABLEWM_HOME"] = f"{os.getcwd()}/.swm_cache"
 ```
 
 ## 12) Benchmark source-trained SWM checkpoint (isolated lane)
+
+This is the correct benchmark path for the current H100 source-trained
+PreJEPA workflow.
 
 ```bash
 !uv run python scripts/benchmark_source_swm_checkpoint.py \
