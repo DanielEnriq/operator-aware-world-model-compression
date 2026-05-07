@@ -59,7 +59,7 @@ def summarize(run_name: str) -> None:
         }
     ]
 
-    for method_dir in sorted(phase2_dir.glob("svd_predictor_rank*")):
+    def add_method_row(method_dir: Path, phase: str) -> None:
         tag = method_dir.name
 
         meta_path = method_dir / "metadata.json"
@@ -67,7 +67,7 @@ def summarize(run_name: str) -> None:
         ranking_path = method_dir / "ranking_eval.json"
 
         if not meta_path.exists() or not transition_path.exists():
-            continue
+            return
 
         meta = load_json(meta_path)
         transition = load_json(transition_path)
@@ -75,14 +75,33 @@ def summarize(run_name: str) -> None:
 
         final_mse = transition["final_transition_mse"]
 
+        # Phase 2 metadata has direct compression counts.
+        # Phase 3 metadata points back to a base compressed model.
+        if phase == "phase2":
+            rank = meta.get("rank_fraction")
+            total_params = meta.get("compressed_total_params")
+            pred_params = meta.get("compressed_predictor_params")
+            total_red = meta.get("total_param_reduction")
+            pred_red = meta.get("predictor_param_reduction")
+        else:
+            base_path = Path(meta["base_compressed_model_path"])
+            base_meta_path = base_path.parent / "metadata.json"
+            base_meta = load_json(base_meta_path)
+
+            rank = base_meta.get("rank_fraction")
+            total_params = base_meta.get("compressed_total_params")
+            pred_params = base_meta.get("compressed_predictor_params")
+            total_red = base_meta.get("total_param_reduction")
+            pred_red = base_meta.get("predictor_param_reduction")
+
         rows.append(
             {
                 "method": tag,
-                "rank": meta["rank_fraction"],
-                "total_params": meta["compressed_total_params"],
-                "pred_params": meta["compressed_predictor_params"],
-                "total_red": meta["total_param_reduction"],
-                "pred_red": meta["predictor_param_reduction"],
+                "rank": rank,
+                "total_params": total_params,
+                "pred_params": pred_params,
+                "total_red": total_red,
+                "pred_red": pred_red,
                 "final_mse": final_mse,
                 "rel_mse": final_mse / original_final_mse,
                 "copy_ratio": final_mse / copy_final_mse,
@@ -94,7 +113,15 @@ def summarize(run_name: str) -> None:
             }
         )
 
-    rows = sorted(rows, key=lambda r: r["rank"], reverse=True)
+
+    for method_dir in sorted(phase2_dir.glob("svd_predictor_rank*")):
+        add_method_row(method_dir, phase="phase2")
+
+    phase3_dir = OUTPUT_ROOT / "phase3" / cfg.run_name
+    if phase3_dir.exists():
+        for method_dir in sorted(phase3_dir.glob("*")):
+            add_method_row(method_dir, phase="phase3")
+        rows = sorted(rows, key=lambda r: r["rank"], reverse=True)
 
     print()
     print(f"Operator-aware compression summary for run={cfg.run_name}")
