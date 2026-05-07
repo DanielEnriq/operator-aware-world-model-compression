@@ -86,7 +86,11 @@ def resolve_training_settings(
     return settings
 
 
-def ensure_required_paths(root: Path, stablewm_home: Path, env_name: str) -> None:
+def ensure_required_paths(
+    root: Path,
+    stablewm_home: Path,
+    env_name: str,
+) -> None:
     swm_src = root / "external" / "stable-worldmodel"
     if not swm_src.exists():
         raise FileNotFoundError(
@@ -136,8 +140,15 @@ def build_hydra_command(
     out_name: str,
     seed: int,
     settings: dict[str, Any],
+    compat_prejepa_safe_shapes: bool,
 ) -> list[str]:
-    upstream_script = str(project_root() / cfg["upstream_script"])
+    if cfg["model_family"] == "swm_prejepa" and compat_prejepa_safe_shapes:
+        script_path = (
+            project_root() / "scripts" / "train_swm_prejepa_compat.py"
+        )
+    else:
+        script_path = project_root() / cfg["upstream_script"]
+    upstream_script = str(script_path)
     command = [sys.executable, upstream_script]
 
     overrides: list[str] = [
@@ -222,7 +233,10 @@ def collect_candidate_artifacts(
     }
 
 
-def copy_selected_artifacts(src_info: dict[str, Any], target_dir: Path) -> list[str]:
+def copy_selected_artifacts(
+    src_info: dict[str, Any],
+    target_dir: Path,
+) -> list[str]:
     copied: list[str] = []
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -267,6 +281,15 @@ def main() -> None:
     parser.add_argument("--limit-val-batches", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument(
+        "--compat-prejepa-safe-shapes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use local compatibility wrapper for PreJEPA training only. "
+            "This does not affect benchmark scripts."
+        ),
+    )
     args = parser.parse_args()
 
     root = project_root()
@@ -280,7 +303,10 @@ def main() -> None:
     stablewm_home.mkdir(parents=True, exist_ok=True)
 
     ensure_required_paths(root, stablewm_home, args.env)
-    ensure_upstream_dataset_layout(stablewm_home=stablewm_home, env_name=args.env)
+    ensure_upstream_dataset_layout(
+        stablewm_home=stablewm_home,
+        env_name=args.env,
+    )
 
     out_name = output_model_name(args.family, args.env, args.seed, args.mode)
     run_id = args.run_id or out_name
@@ -308,6 +334,7 @@ def main() -> None:
         out_name=out_name,
         seed=args.seed,
         settings=settings,
+        compat_prejepa_safe_shapes=args.compat_prejepa_safe_shapes,
     )
 
     swm_train_dir = (
@@ -315,7 +342,9 @@ def main() -> None:
     )
     env = os.environ.copy()
     env["STABLEWM_HOME"] = str(stablewm_home)
-    source_pythonpath = f"{root / 'external' / 'stable-worldmodel'}:{root / 'src'}"
+    source_pythonpath = (
+        f"{root / 'external' / 'stable-worldmodel'}:{root / 'src'}"
+    )
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = (
         f"{source_pythonpath}:{existing_pythonpath}"
