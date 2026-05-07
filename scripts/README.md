@@ -5,6 +5,7 @@
 | `scripts/fetch_lewm_datasets.py` | data | canonical | Download official LeWM datasets into `$STABLEWM_HOME`. | `uv run python scripts/fetch_lewm_datasets.py --datasets tworoom pusht ogbench_cube` |
 | `scripts/check_benchmark_data.py` | benchmark | canonical | Validate dataset/world availability and eval sampling. | `uv run python scripts/check_benchmark_data.py --env tworoom --num-eval 4 --seed 0` |
 | `scripts/benchmark_cost_model.py` | benchmark | canonical | Dataset-driven control benchmark for cost models. | `uv run python scripts/benchmark_cost_model.py --env tworoom --model-family lewm_hf --checkpoint quentinll/lewm-tworooms --tag lewm_tworoom --num-eval 50 --seed 0 --device cuda` |
+| `scripts/benchmark_source_swm_checkpoint.py` | benchmark | canonical (isolated source lane) | Benchmark source-trained SWM checkpoints using source SWM APIs. Not for official LeWM comparison benchmarks. | `uv run python scripts/benchmark_source_swm_checkpoint.py --env tworoom --checkpoint oawc_swm_prejepa_tworoom_seed0_smoke --tag prejepa_tworoom_smoke --num-eval 1 --seed 0 --device cpu --smoke-planner` |
 | `scripts/benchmark_random_baseline.py` | benchmark | canonical | Random-policy baseline for context and sanity checks. | `uv run python scripts/benchmark_random_baseline.py --env tworoom --num-eval 50 --seed 0` |
 | `scripts/summarize_benchmarks.py` | benchmark | canonical | Aggregate benchmark JSON outputs into summary views. | `uv run python scripts/summarize_benchmarks.py` |
 | `scripts/check_model_artifacts.py` | inspect | active | Check known model artifact locations and optional loads. | `uv run python scripts/check_model_artifacts.py --try-load` |
@@ -15,3 +16,16 @@
 | `scripts/phase1_*` | legacy | legacy / research scratch | Early phase-1 exploratory scripts for data/model probing. | Varies by script |
 | `scripts/phase2_*` | legacy | legacy / research scratch | Early phase-2 compression/eval experiments. | Varies by script |
 | `scripts/phase3_*` | legacy | legacy / research scratch | Early phase-3 distillation experiments. | Varies by script |
+
+## Lane separation quick reference
+
+- Official LeWM benchmark lane:
+  - `export PYTHONPATH="$PWD/src"`
+  - `export STABLEWM_HOME="$PWD/.swm_cache"`
+  - `uv run python scripts/benchmark_cost_model.py ...`
+- Source-SWM training and source checkpoint benchmark lane:
+  - `export PYTHONPATH="$PWD/external/stable-worldmodel:$PWD/src"`
+  - `export STABLEWM_HOME="$PWD/.swm_cache"`
+  - `uv run python scripts/train_world_model.py --family swm_prejepa ...`
+  - `uv run python scripts/benchmark_source_swm_checkpoint.py ... --smoke-planner`
+- CPU source benchmark must use `--smoke-planner`; run full CEM on GPU/H100.

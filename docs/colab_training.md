@@ -2,6 +2,18 @@
 
 For large runs, prefer writing checkpoints to local Colab storage during training and copying final artifacts to Drive at the end.
 
+## Important lane separation
+
+- Official LeWM benchmark lane (installed SWM):
+  - `PYTHONPATH="$PWD/src"`
+  - Use `scripts/benchmark_cost_model.py` for official LeWM comparisons.
+- Source-SWM lane (training + source checkpoint benchmarking):
+  - `PYTHONPATH="$PWD/external/stable-worldmodel:$PWD/src"`
+  - Use `scripts/train_world_model.py` and `scripts/benchmark_source_swm_checkpoint.py`.
+- `scripts/benchmark_source_swm_checkpoint.py` is only for source-trained SWM checkpoints.
+- On CPU, source checkpoint benchmark must use `--smoke-planner`.
+- Full CEM source checkpoint benchmark should run on GPU/H100.
+
 ## 1) Clone repo
 
 ```bash
@@ -91,4 +103,17 @@ os.environ["STABLEWM_HOME"] = f"{os.getcwd()}/.swm_cache"
   --num-eval 50 \
   --seed 0 \
   --device cuda
+```
+
+## 12) Benchmark source-trained SWM checkpoint (isolated lane)
+
+```bash
+!uv run python scripts/benchmark_source_swm_checkpoint.py \
+  --env tworoom \
+  --checkpoint <run_name> \
+  --tag <tag> \
+  --num-eval 1 \
+  --seed 0 \
+  --device cpu \
+  --smoke-planner
 ```
