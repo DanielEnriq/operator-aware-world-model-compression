@@ -18,6 +18,8 @@ dependencies = [
     "huggingface-hub>=1.14.0",
     "scikit-learn>=1.7.2",
     "zstandard>=0.25.0",
+    "stable-pretraining>=0.1.6",
+    "datasets>=2.14,<3",
 ]
 
 [tool.setuptools.packages.find]

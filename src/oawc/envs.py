@@ -43,11 +43,18 @@ ENV_SPECS: dict[str, EnvSpec] = {
     "tworoom": EnvSpec(
         name="tworoom",
         env_id="swm/TwoRoom-v1",
+
+        # Matches external/le-wm/config/eval/tworoom.yaml.
+        # Important: training/data uses frameskip=5, but the eval World uses
+        # frame_skip=1 and PlanConfig.action_block=5.
         history_size=1,
+        frame_skip=1,
+        action_block=5,
+
         action_dim=2,
         observation_kind="low_dim_state",
-        eval_budget_steps=150,
-        goal_distance_steps=100,
+        eval_budget_steps=50,
+        goal_distance_steps=25,
         cem_iterations=10,
         lewm_eval_config="external/le-wm/config/eval/tworoom.yaml",
     ),
