@@ -19,6 +19,21 @@ REQUIRED_IMPORTS = [
     ("stable_worldmodel.wm.loss", "TemporalStraighteningLoss"),
 ]
 
+DATASET_SPECS = {
+    "tworoom": {
+        "upstream_data_config": "tworoom.yaml",
+        "dataset_path": Path("tworoom.h5"),
+    },
+    "pusht": {
+        "upstream_data_config": "pusht.yaml",
+        "dataset_path": Path("pusht_expert_train.h5"),
+    },
+    "ogbench_cube": {
+        "upstream_data_config": "ogb.yaml",
+        "dataset_path": Path("ogbench") / "cube_single_expert.h5",
+    },
+}
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -47,6 +62,17 @@ def main() -> None:
         help=(
             "Allow stable_worldmodel imports from site-packages. "
             "By default this script requires external/stable-worldmodel."
+        ),
+    )
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        choices=sorted(DATASET_SPECS.keys()),
+        default=sorted(DATASET_SPECS.keys()),
+        help=(
+            "Only validate selected datasets and matching upstream "
+            "data configs. "
+            "Use '--datasets tworoom' for a TwoRoom-only setup."
         ),
     )
     args = parser.parse_args()
@@ -89,21 +115,13 @@ def main() -> None:
         "upstream train config (pldm)",
         failures,
     )
-    _check_path(
-        data_dir / "tworoom.yaml",
-        "upstream data config (tworoom)",
-        failures,
-    )
-    _check_path(
-        data_dir / "pusht.yaml",
-        "upstream data config (pusht)",
-        failures,
-    )
-    _check_path(
-        data_dir / "ogb.yaml",
-        "upstream data config (ogb)",
-        failures,
-    )
+    for dataset_name in args.datasets:
+        data_config = DATASET_SPECS[dataset_name]["upstream_data_config"]
+        _check_path(
+            data_dir / data_config,
+            f"upstream data config ({dataset_name})",
+            failures,
+        )
     print()
 
     try:
@@ -122,7 +140,8 @@ def main() -> None:
                 rel = False
             if not rel:
                 msg = (
-                    "stable_worldmodel is not imported from external/stable-worldmodel. "
+                    "stable_worldmodel is not imported from "
+                    "external/stable-worldmodel. "
                     "Set PYTHONPATH to prioritize external source."
                 )
                 failures.append(msg)
@@ -149,13 +168,13 @@ def main() -> None:
             print(f"[OK] import {module_name}.{symbol_name}")
 
     print()
-    _check_path(stablewm_home / "tworoom.h5", "dataset (tworoom)", failures)
-    _check_path(stablewm_home / "pusht_expert_train.h5", "dataset (pusht)", failures)
-    _check_path(
-        stablewm_home / "ogbench" / "cube_single_expert.h5",
-        "dataset (ogbench_cube)",
-        failures,
-    )
+    for dataset_name in args.datasets:
+        rel_path = DATASET_SPECS[dataset_name]["dataset_path"]
+        _check_path(
+            stablewm_home / rel_path,
+            f"dataset ({dataset_name})",
+            failures,
+        )
 
     if failures:
         print("\n=== RESULT: FAILED ===")
@@ -167,13 +186,15 @@ def main() -> None:
         )
         print(
             "2) Set source-first environment:\n"
-            "   export PYTHONPATH=\"$PWD/external/stable-worldmodel:$PWD/src\"\n"
+            "   export PYTHONPATH="
+            "\"$PWD/external/stable-worldmodel:$PWD/src\"\n"
             "   export STABLEWM_HOME=\"$PWD/.swm_cache\""
         )
         print(
             "3) Fetch datasets:\n"
             "   uv run python scripts/fetch_lewm_datasets.py --datasets "
-            "tworoom pusht ogbench_cube"
+            "tworoom pusht ogbench_cube\n"
+            "   (or for TwoRoom-only: --datasets tworoom)"
         )
         raise SystemExit(1)
 
