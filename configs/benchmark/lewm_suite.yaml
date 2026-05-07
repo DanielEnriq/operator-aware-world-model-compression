@@ -1,0 +1,277 @@
+# Operator-Aware World Model Compression benchmark config.
+#
+# This freezes the experimental setup we are adopting from the LeWorldModel /
+# stable-worldmodel evaluation protocol.
+#
+# The goal is not to invent a new environment setup yet. The goal is to match
+# the stable-worldmodel / LeWM setup closely enough that compression results are
+# interpretable against the original world-model evaluation protocol.
+
+benchmark:
+  name: lewm_swm_suite
+  library: stable-worldmodel
+  image_size: 224
+  frame_skip: 5
+  action_block: 5
+  train_subtrajectory_size: 4
+  train_batch_size: 128
+  train_epochs_reference: 10
+  hardware_reference: NVIDIA L40S
+  notes:
+    - "Frame-skip 5 groups consecutive actions between frames into one action block."
+    - "Sub-trajectories of size 4 correspond to 4 frames and 4 blocks of 5 actions."
+    - "Each frame is 224x224 RGB."
+    - "Evaluation is performed using PyTorch and Gymnasium through stable-worldmodel."
+
+models:
+  lewm:
+    enabled: true
+    family: LeWM
+    type: end_to_end_jepa
+    description: "End-to-end JEPA trained from pixels with prediction loss + SIGReg."
+    encoder:
+      type: ViT-Tiny
+      patch_size: 14
+      hidden_dim: 192
+      representation: cls_token
+      trainable_in_original: true
+    projector:
+      type: MLP
+      norm: BatchNorm1d
+      role: "Maps ViT CLS token into LeWM latent representation space."
+    predictor:
+      type: ViT-S-style latent dynamics transformer
+      depth: 6
+      heads: 16
+      dropout: 0.1
+      causal_masking: true
+      action_conditioning: AdaLN
+      role: "Autoregressive latent transition model."
+    pred_proj:
+      type: MLP
+      norm: BatchNorm1d
+      role: "Maps predictor output into latent embedding space."
+    training_objective:
+      prediction_loss: "|| zhat_{t+1} - z_{t+1} ||_2^2"
+      regularizer: SIGReg
+      sigreg_weight_reference: 0.1
+      sigreg_random_projections_reference: 1024
+    compression_targets:
+      primary:
+        - predictor
+      secondary:
+        - predictor
+        - pred_proj
+      full_transition:
+        - action_encoder
+        - predictor
+        - pred_proj
+      full_model:
+        - encoder
+        - projector
+        - action_encoder
+        - predictor
+        - pred_proj
+
+  dino_wm:
+    enabled: true
+    family: DINO-WM
+    type: frozen_foundation_encoder_jepa
+    description: "World model trained on frozen DINOv2 features."
+    encoder:
+      type: DINOv2
+      frozen: true
+    training_objective:
+      prediction_loss: "Mean squared error between predicted next DINO embedding and ground-truth next DINO embedding."
+    compression_targets:
+      primary:
+        - predictor
+      secondary:
+        - predictor
+        - projection_or_token_interface
+      excluded_initially:
+        - frozen_dinov2_encoder
+
+  pldm:
+    enabled: true
+    family: PLDM
+    type: end_to_end_jepa_vicreg_style
+    description: "End-to-end JEPA with VICReg-inspired multi-term regularization."
+    training_objective:
+      terms:
+        - pred
+        - var
+        - cov
+        - time_sim
+        - time_var
+        - time_cov
+        - inverse_dynamics
+      reference_coefficients:
+        alpha_var: 18.0
+        beta_cov: 12.0
+        gamma_time_sim: 0.2
+        zeta_time_var: 0.7
+        nu_time_cov: 0.0
+        mu_idm: 0.0
+    compression_targets:
+      primary:
+        - predictor
+      secondary:
+        - predictor
+        - projection_heads
+      full_transition:
+        - action_encoder
+        - predictor
+        - projection_heads
+
+environments:
+  tworoom:
+    enabled: true
+    swm_env_id: swm/TwoRoom-v1
+    lewm_eval_config: external/le-wm/config/eval/tworoom.yaml
+    type: continuous_2d_navigation
+    history_size: 1
+    action_block: 5
+    dataset:
+      reference_episodes: 10000
+      average_trajectory_length: 92
+      behavior_policy: noisy_heuristic
+      notes:
+        - "Agent navigates between two rooms through a doorway."
+        - "Low-complexity / low-intrinsic-dimensionality environment."
+    control_eval:
+      evaluation_budget_steps: 150
+      goal_distance_steps: 100
+      success_metric: stable_worldmodel_env_success
+
+  pusht:
+    enabled: true
+    swm_env_id: swm/PushT-v1
+    discrete_swm_env_id: swm/PushT-Discrete-v1
+    lewm_eval_config: external/le-wm/config/eval/pusht.yaml
+    type: continuous_2d_manipulation
+    history_size: 3
+    action_block: 5
+    dataset:
+      reference_episodes: 20000
+      average_trajectory_length: 196
+      behavior_policy: expert
+      notes:
+        - "Agent pushes a T-shaped block toward a target configuration."
+        - "This is our current working prototype environment."
+    control_eval:
+      evaluation_budget_steps: 50
+      goal_distance_steps: 25
+      success_metric: stable_worldmodel_env_success
+
+  ogbench_cube:
+    enabled: true
+    swm_env_id: swm/OGBCube-v0
+    lewm_eval_config: external/le-wm/config/eval/cube.yaml
+    type: continuous_3d_robotic_manipulation
+    history_size: 3
+    action_block: 5
+    dataset:
+      reference_episodes: 10000
+      episode_length: 200
+      behavior_policy: benchmark_data_collection_heuristic
+      notes:
+        - "Single-cube OGBench variant."
+        - "Robotic arm picks up and places a cube at a target location."
+        - "Visually richer 3D environment."
+    control_eval:
+      evaluation_budget_steps: 50
+      goal_distance_steps: 25
+      success_metric: stable_worldmodel_env_success
+
+planning:
+  solver: CEM
+  candidate_sequences_per_iteration: 300
+  elites_per_iteration: 30
+  initial_sampling_variance: 1.0
+  horizon_blocks: 5
+  horizon_env_steps: 25
+  mpc_scheme: receding_horizon
+  execute_full_optimized_sequence_before_replanning: true
+  max_iterations:
+    pusht: 30
+    tworoom: 10
+    ogbench_cube: 10
+  planning_cost:
+    type: terminal_latent_goal_matching
+    formula: "C(zhat_H) = || zhat_H - z_g ||_2^2"
+  notes:
+    - "The original LeWM paper uses CEM for latent planning."
+    - "Planning horizon 5 corresponds to 25 environment timesteps because frame_skip=5."
+    - "For PushT, CEM uses 30 optimization iterations; other environments use 10."
+
+compression:
+  target_scope_order:
+    - predictor
+    - predictor_plus_pred_proj
+    - full_transition
+    - full_model
+  primary_scope_for_main_experiments: predictor
+  mechanisms:
+    dense_low_rank_svd:
+      enabled: true
+      rank_fractions:
+        - 0.75
+        - 0.50
+        - 0.25
+      notes:
+        - "Dense low-rank keeps GPU-compatible PyTorch Linear modules."
+        - "This is the post-hoc compression baseline, not the main novelty."
+    operator_distillation:
+      enabled: true
+      objective: "MSE(student_transition, teacher_transition) + beta * MSE(student_transition, target_embedding)"
+      beta_target_default: 0.25
+      notes:
+        - "Transition-operator recovery baseline."
+    rollout_distillation:
+      enabled: true
+      objective: "Multi-step rollout MSE between teacher and student imagined latents."
+      notes:
+        - "First truly world-model-specific recovery objective."
+    planning_ranking_distillation:
+      enabled: true
+      objective: "KL softmax(-teacher_cost/tau) || softmax(-student_cost/tau)"
+      notes:
+        - "Main operator-aware objective: preserve CEM/MPC candidate action ranking."
+
+evaluation:
+  primary:
+    - control_success_rate
+    - planning_latency
+    - candidate_evaluations_per_second
+    - peak_gpu_memory
+    - parameter_count
+    - model_size_bytes
+  operator_diagnostics:
+    - teacher_forced_transition_mse
+    - autoregressive_rollout_mse
+    - planning_cost_mse
+    - planning_cost_spearman
+    - top1_action_agreement
+    - topk_action_overlap
+  optional_diagnostics:
+    - violation_of_expectation_surprise
+    - latent_probing
+    - temporal_latent_path_straightening
+  split_protocol:
+    enabled: true
+    train_fraction: 0.7
+    seed: 42
+    notes:
+      - "Compression calibration/fine-tuning data must be separated from evaluation data."
+      - "No paper claims should be made from same-data fine-tune/eval results."
+
+paper_claim_contract:
+  main_claim: "World-model compression should preserve the deployed latent prediction/planning operator, not merely parameter distance or local transition MSE."
+  core_hypothesis:
+    - "Naive compression can preserve transition MSE while damaging planning-cost rankings."
+    - "Operator-aware recovery objectives better preserve ranking/control behavior at fixed compression budget."
+  non_claims:
+    - "We are not claiming SVD itself is novel."
+    - "We are not initially compressing frozen foundation encoders."
+    - "Ranking fidelity is not a substitute for final closed-loop success; it is an operator diagnostic."
