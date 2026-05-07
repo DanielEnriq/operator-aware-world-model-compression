@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -12,13 +14,24 @@ from oawc.models.lewm_loader import load_lewm_from_hf
 from oawc.paths import phase1_dirs, save_json
 
 
+def ensure_lewm_source_on_path() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    lewm_src = project_root / "external" / "le-wm"
+
+    if not lewm_src.exists():
+        raise FileNotFoundError(
+            f"Missing LeWM source at {lewm_src}. "
+            "Run: git clone https://github.com/lucas-maes/le-wm.git external/le-wm"
+        )
+
+    if str(lewm_src) not in sys.path:
+        sys.path.insert(0, str(lewm_src))
+
+
 def make_action_blocks(actions: np.ndarray, block_size: int) -> np.ndarray:
     """
     actions: (T, E, A)
     returns: (T - block_size + 1, E, block_size * A)
-
-    This matches LeWM's frameskip/action-block idea:
-    consecutive raw environment actions are concatenated into one action block.
     """
     if actions.ndim != 3:
         raise ValueError(f"Expected actions shape (T, E, A), got {actions.shape}")
@@ -42,7 +55,10 @@ def make_action_blocks(actions: np.ndarray, block_size: int) -> np.ndarray:
     return np.asarray(blocks, dtype=np.float32)
 
 
-def compute_action_block_stats(actions: np.ndarray, action_block: int) -> tuple[np.ndarray, np.ndarray]:
+def compute_action_block_stats(
+    actions: np.ndarray,
+    action_block: int,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Diagnostic action normalization.
 
@@ -140,9 +156,6 @@ def to_pixel_tensor(x: np.ndarray, device: str) -> torch.Tensor:
     """
     x: (B, T, H, W, C), uint8
     returns: (B, T, C, H, W), ImageNet-normalized
-
-    LeWM training uses stable-pretraining's ToImage with ImageNet stats,
-    so this is closer than raw x / 255.
     """
     t = torch.tensor(x, dtype=torch.float32, device=device) / 255.0
     t = t.permute(0, 1, 4, 2, 3).contiguous()
@@ -157,12 +170,33 @@ def to_action_tensor(a: np.ndarray, device: str) -> torch.Tensor:
     return torch.tensor(a, dtype=torch.float32, device=device)
 
 
+def load_lewm_model(
+    checkpoint_repo: str,
+    device: str,
+    model_path: str | None = None,
+) -> tuple[torch.nn.Module, str]:
+    ensure_lewm_source_on_path()
+
+    if model_path is None:
+        model = load_lewm_from_hf(checkpoint_repo, device=device)
+        model_source = checkpoint_repo
+    else:
+        model = torch.load(model_path, map_location=device, weights_only=False)
+        model.to(device)
+        model.eval()
+        model_source = model_path
+
+    return model, model_source
+
+
 def lewm_transition_metrics(
     run_name: str,
     batch_size: int = 32,
     device: str = "auto",
     max_batches: int | None = None,
     normalize_actions: bool = True,
+    model_path: str | None = None,
+    tag: str | None = None,
 ) -> None:
     cfg = get_run_config(run_name)
     dirs = phase1_dirs(cfg)
@@ -171,7 +205,12 @@ def lewm_transition_metrics(
     actions_path = dirs["data"] / "actions.npy"
     terminateds_path = dirs["data"] / "terminateds.npy"
     truncateds_path = dirs["data"] / "truncateds.npy"
-    out_path = dirs["results"] / "lewm_transition_metrics.json"
+
+    suffix = "norm_actions" if normalize_actions else "raw_actions"
+    if tag is None:
+        tag = "original" if model_path is None else Path(model_path).parent.name
+
+    out_path = dirs["results"] / f"lewm_transition_metrics_{tag}_{suffix}.json"
 
     for path in [obs_path, actions_path, terminateds_path, truncateds_path]:
         if not path.exists():
@@ -205,7 +244,11 @@ def lewm_transition_metrics(
     if normalize_actions:
         action_seq = normalize_action_blocks(action_seq, action_mean, action_std)
 
-    model = load_lewm_from_hf(cfg.checkpoint_repo, device=device)
+    model, model_source = load_lewm_model(
+        checkpoint_repo=cfg.checkpoint_repo,
+        device=device,
+        model_path=model_path,
+    )
 
     seq_mse_values = []
     final_mse_values = []
@@ -256,12 +299,11 @@ def lewm_transition_metrics(
             per_ex_seq_mse = ((pred - emb_target) ** 2).mean(dim=(1, 2))
             per_ex_final_mse = ((pred[:, -1] - emb_target[:, -1]) ** 2).mean(dim=1)
 
-            # Copy baseline: predict z_{k+1} := z_k.
             copy_pred = emb_context
             copy_seq_mse = ((copy_pred - emb_target) ** 2).mean(dim=(1, 2))
             copy_final_mse = ((copy_pred[:, -1] - emb_target[:, -1]) ** 2).mean(dim=1)
 
-            per_step = ((pred - emb_target) ** 2).mean(dim=2).sum(dim=0)  # (H,)
+            per_step = ((pred - emb_target) ** 2).mean(dim=2).sum(dim=0)
             if per_step_sums is None:
                 per_step_sums = per_step.detach().cpu()
             else:
@@ -294,6 +336,8 @@ def lewm_transition_metrics(
         "run_name": cfg.run_name,
         "model_family": "LeWM",
         "checkpoint_repo": cfg.checkpoint_repo,
+        "model_source": str(model_source),
+        "tag": tag,
         "num_examples_total": int(len(pixel_seq)),
         "num_examples_eval": int(len(seq_mse)),
         "history_size": int(cfg.history_size),
@@ -341,6 +385,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--max-batches", type=int, default=None)
+    parser.add_argument("--model-path", default=None)
+    parser.add_argument("--tag", default=None)
     parser.add_argument(
         "--no-action-normalization",
         action="store_true",
@@ -354,6 +400,8 @@ def main() -> None:
         device=args.device,
         max_batches=args.max_batches,
         normalize_actions=not args.no_action_normalization,
+        model_path=args.model_path,
+        tag=args.tag,
     )
 
 
