@@ -15,6 +15,8 @@ import stable_worldmodel as swm
 from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 
+from oawc.models import load_cost_model as load_registered_cost_model
+
 from oawc.benchmark import (
     get_dataset_name,
     load_hdf5_dataset,
@@ -102,7 +104,7 @@ def fit_policy_processors(dataset: Any, keys_to_process: list[str]) -> dict[str,
     return process
 
 
-def load_cost_model(
+def load_cost_model_legacy(
     *,
     model_family: str,
     checkpoint: str,
@@ -240,11 +242,13 @@ def run_cost_model_benchmark(
     episodes_idx = eval_tasks["episodes_idx"]
     start_steps = eval_tasks["start_steps"]
 
-    model = load_cost_model(
-        model_family=model_family,
+    loaded_model = load_registered_cost_model(
+        family=model_family,
         checkpoint=checkpoint,
+        env_name=env_name,
         device=device,
     )
+    model = loaded_model.model
 
     policy = make_world_model_policy(
         env_name=env_name,
