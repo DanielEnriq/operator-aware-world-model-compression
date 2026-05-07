@@ -20,6 +20,9 @@ dependencies = [
     "zstandard>=0.25.0",
     "stable-pretraining>=0.1.6",
     "datasets>=2.14,<3",
+    "osfclient>=0.0.5",
+    "gdown>=6.0.0",
+    "pyyaml>=6.0.0",
 ]
 
 [tool.setuptools.packages.find]

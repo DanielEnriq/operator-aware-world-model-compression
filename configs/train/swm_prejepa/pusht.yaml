@@ -1,0 +1,30 @@
+model_family: swm_prejepa
+env: pusht
+dataset_name: pusht_expert_train
+upstream_script: external/stable-worldmodel/scripts/train/prejepa.py
+upstream_config_name: prejepa
+upstream_data_config: null
+default_stablewm_home: .swm_cache
+output_model_name: oawc_swm_prejepa_pusht_seed0
+seed: 0
+training:
+  full:
+    max_epochs: 10
+    batch_size: 32
+    num_workers: 16
+    accelerator: gpu
+    precision: 16-mixed
+    devices: auto
+  smoke:
+    max_epochs: 1
+    batch_size: 2
+    num_workers: 0
+    accelerator: cpu
+    precision: 32
+    devices: 1
+    limit_train_batches: 2
+    limit_val_batches: 2
+benchmark:
+  smoke_num_eval: 4
+  full_num_eval: 50
+notes: Reproduction checkpoint using upstream SWM PreJEPA training script.

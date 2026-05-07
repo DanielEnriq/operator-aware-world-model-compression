@@ -13,7 +13,6 @@ artifacts/*
 !artifacts/.gitkeep
 
 data/
-checkpoints/
 wandb/
 mlruns/
 
@@ -23,5 +22,28 @@ mlruns/
 *.safetensors
 *.h5
 *.hdf5
+
+# Local SWM/LeWM cache and run outputs
 .swm_cache/
 external/
+
+# Optional external repos/artifacts (not tracked by default)
+external/stable-worldmodel/
+external/dino_wm/
+external/lewm_baselines/
+external/dino_wm_ckpts/
+
+# Checkpoint artifacts (keep metadata/configs only)
+checkpoints/**/*.pt
+checkpoints/**/*.pth
+checkpoints/**/*.ckpt
+checkpoints/**/*.safetensors
+checkpoints/**/wandb/
+checkpoints/**/lightning_logs/
+
+# Keep project checkpoint structure and reproducibility metadata in git
+!checkpoints/README.md
+!checkpoints/**/metadata.json
+!checkpoints/**/config.yaml
+!checkpoints/**/config.json
+!checkpoints/**/.gitkeep

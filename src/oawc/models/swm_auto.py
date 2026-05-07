@@ -16,7 +16,8 @@ def load_lewm_hf(
     """
     Load official LeWM HuggingFace checkpoints.
 
-    Important: these checkpoints use config targets from the LeWM/SWM source tree
+    Important: these checkpoints use config targets from the
+    LeWM/SWM source tree
     that may not exist in the installed stable_worldmodel wheel. Therefore this
     intentionally delegates to our dedicated LeWM loader instead of using
     Hydra directly or swm.policy.AutoCostModel.
@@ -51,4 +52,29 @@ def load_swm_auto(
         family="swm_auto",
         checkpoint=checkpoint,
         source="stable_worldmodel.policy.AutoCostModel",
+    )
+
+
+@register_model_loader("swm_pretrained")
+def load_swm_pretrained(
+    *,
+    checkpoint: str,
+    env_name: str,
+    device: str | torch.device,
+) -> LoadedCostModel:
+    """
+    Load SWM save_pretrained-style checkpoints via config.json + weights .pt.
+
+    This loader expects `checkpoint` to be either:
+    - a run directory, or
+    - a specific .pt file, or
+    - a run name resolvable under $STABLEWM_HOME/checkpoints.
+    """
+    model = swm.wm.utils.load_pretrained(checkpoint)
+
+    return LoadedCostModel(
+        model=model,
+        family="swm_pretrained",
+        checkpoint=checkpoint,
+        source="stable_worldmodel.wm.utils.load_pretrained",
     )

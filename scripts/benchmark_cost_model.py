@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -15,7 +14,10 @@ import stable_worldmodel as swm
 from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 
-from oawc.models import load_cost_model as load_registered_cost_model
+from oawc.models import (
+    available_model_families,
+    load_cost_model as load_registered_cost_model,
+)
 
 from oawc.benchmark import (
     get_dataset_name,
@@ -380,14 +382,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--env", default="tworoom", choices=list(ENV_SPECS.keys()))
+    families = available_model_families()
     parser.add_argument(
         "--model-family",
         default="lewm_hf",
-        choices=["auto", "torch", "lewm_hf"],
+        choices=families,
         help=(
-            "auto: swm.policy.AutoCostModel(checkpoint); "
-            "torch: torch.load(checkpoint); "
-            "lewm_hf: oawc.models.lewm_loader.load_lewm_from_hf(checkpoint)."
+            "Model loader family from oawc.models registry. "
+            f"Available: {', '.join(families)}."
         ),
     )
     parser.add_argument("--checkpoint", required=True)

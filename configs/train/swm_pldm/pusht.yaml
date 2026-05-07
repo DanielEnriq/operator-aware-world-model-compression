@@ -1,0 +1,30 @@
+model_family: swm_pldm
+env: pusht
+dataset_name: pusht_expert_train.h5
+upstream_script: external/stable-worldmodel/scripts/train/pldm.py
+upstream_config_name: pldm
+upstream_data_config: pusht
+default_stablewm_home: .swm_cache
+output_model_name: oawc_swm_pldm_pusht_seed0
+seed: 0
+training:
+  full:
+    max_epochs: 100
+    batch_size: 128
+    num_workers: 6
+    accelerator: gpu
+    precision: bf16
+    devices: auto
+  smoke:
+    max_epochs: 1
+    batch_size: 2
+    num_workers: 0
+    accelerator: cpu
+    precision: 32
+    devices: 1
+    limit_train_batches: 2
+    limit_val_batches: 2
+benchmark:
+  smoke_num_eval: 4
+  full_num_eval: 50
+notes: Reproduction checkpoint using upstream SWM PLDM training script.
