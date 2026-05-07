@@ -2,7 +2,7 @@
   "project_train_config": {
     "model_family": "swm_prejepa",
     "env": "tworoom",
-    "dataset_name": "tworoom",
+    "dataset_name": "tworoom.h5",
     "upstream_script": "external/stable-worldmodel/scripts/train/prejepa.py",
     "upstream_config_name": "prejepa",
     "upstream_data_config": null,

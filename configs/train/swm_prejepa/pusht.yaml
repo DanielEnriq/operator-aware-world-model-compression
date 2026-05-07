@@ -1,6 +1,6 @@
 model_family: swm_prejepa
 env: pusht
-dataset_name: pusht_expert_train
+dataset_name: pusht_expert_train.h5
 upstream_script: external/stable-worldmodel/scripts/train/prejepa.py
 upstream_config_name: prejepa
 upstream_data_config: null

@@ -102,6 +102,32 @@ def ensure_required_paths(root: Path, stablewm_home: Path, env_name: str) -> Non
         )
 
 
+def ensure_upstream_dataset_layout(
+    *,
+    stablewm_home: Path,
+    env_name: str,
+) -> Path:
+    """
+    Ensure datasets exist at the location expected by swm.data.load_dataset:
+    <STABLEWM_HOME>/datasets/<dataset_relpath>.
+    """
+    dataset_rel = Path(ENV_DATASET_FILES[env_name])
+    source_path = stablewm_home / dataset_rel
+    datasets_root = stablewm_home / "datasets"
+    target_path = datasets_root / dataset_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if target_path.exists():
+        return target_path
+
+    try:
+        target_path.symlink_to(source_path)
+    except OSError:
+        shutil.copy2(source_path, target_path)
+
+    return target_path
+
+
 def build_hydra_command(
     cfg: dict[str, Any],
     *,
@@ -254,6 +280,7 @@ def main() -> None:
     stablewm_home.mkdir(parents=True, exist_ok=True)
 
     ensure_required_paths(root, stablewm_home, args.env)
+    ensure_upstream_dataset_layout(stablewm_home=stablewm_home, env_name=args.env)
 
     out_name = output_model_name(args.family, args.env, args.seed, args.mode)
     run_id = args.run_id or out_name

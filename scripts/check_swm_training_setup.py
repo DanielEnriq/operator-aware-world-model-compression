@@ -9,8 +9,8 @@ from pathlib import Path
 
 REQUIRED_IMPORTS = [
     ("stable_worldmodel.wm.prejepa", "PreJEPA"),
-    ("stable_worldmodel.wm.prejepa", "CausalPredictor"),
-    ("stable_worldmodel.wm.prejepa", "Embedder"),
+    ("stable_worldmodel.wm.prejepa.module", "CausalPredictor"),
+    ("stable_worldmodel.wm.prejepa.module", "Embedder"),
     ("stable_worldmodel.wm.pldm", "PLDM"),
     ("stable_worldmodel.wm.pldm.module", "MLP"),
     ("stable_worldmodel.wm.pldm.module", "Embedder"),

@@ -1,0 +1,58 @@
+output_model_name: oawc_swm_prejepa_tworoom_seed0_smoke
+subdir: oawc_swm_prejepa_tworoom_seed0_smoke
+seed: 0
+dataset_name: tworoom.h5
+cache_dir: /Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache
+n_steps: ${eval:'${wm.num_preds} + ${wm.history_size}'}
+frameskip: 5
+batch_size: 2
+num_workers: 0
+train_split: 0.9
+backbone:
+  name: facebook/dinov2-small
+  type: dinov2_small
+  is_video_encoder: false
+image_size: 224
+patch_size: 14
+wm:
+  history_size: 3
+  num_preds: 1
+  encoding:
+    proprio: 10
+    action: 10
+predictor:
+  size: small
+  depth: 6
+  heads: 16
+  mlp_dim: 2048
+  dim_head: 64
+  dropout: 0.1
+  emb_dropout: 0.0
+optimizer:
+  type: AdamW
+  lr: 0.0005
+  weight_decay: 0.0
+trainer:
+  max_epochs: 1
+  strategy: ddp
+  devices: 1
+  accelerator: cpu
+  precision: 32
+  gradient_clip_val: 1.0
+  limit_train_batches: 2
+  limit_val_batches: 2
+dump_object: true
+n_gpus: 1
+cpus_per_task: 8
+wandb:
+  enabled: false
+  config:
+    entity: stable-wm
+    project: stable-wm
+    name: ${output_model_name}
+    id: ${subdir}
+    resume: allow
+    log_model: false
+extra_dims:
+  proprio: 2
+  action: 10

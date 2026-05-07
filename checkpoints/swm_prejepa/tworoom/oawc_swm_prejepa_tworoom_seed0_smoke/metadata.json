@@ -1,5 +1,5 @@
 {
-  "timestamp_utc": "2026-05-07T18:50:13.400692+00:00",
+  "timestamp_utc": "2026-05-07T19:08:03.634815+00:00",
   "family": "swm_prejepa",
   "env": "tworoom",
   "mode": "smoke",
@@ -7,9 +7,9 @@
   "seed": 0,
   "run_id": "oawc_swm_prejepa_tworoom_seed0_smoke",
   "output_model_name": "oawc_swm_prejepa_tworoom_seed0_smoke",
-  "dry_run": true,
-  "launched_training": false,
-  "return_code": null,
+  "dry_run": false,
+  "launched_training": true,
+  "return_code": 1,
   "command": [
     "/Users/danielenriquez/projects/operator-aware-world-model-compression/.venv/bin/python3",
     "/Users/danielenriquez/projects/operator-aware-world-model-compression/external/stable-worldmodel/scripts/train/prejepa.py",
@@ -18,7 +18,7 @@
     "seed=0",
     "cache_dir=/Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache",
     "wandb.enabled=false",
-    "dataset_name=tworoom",
+    "dataset_name=tworoom.h5",
     "batch_size=2",
     "num_workers=0",
     "trainer.max_epochs=1",
@@ -28,20 +28,27 @@
     "+trainer.limit_train_batches=2",
     "+trainer.limit_val_batches=2"
   ],
-  "command_display": "/Users/danielenriquez/projects/operator-aware-world-model-compression/.venv/bin/python3 /Users/danielenriquez/projects/operator-aware-world-model-compression/external/stable-worldmodel/scripts/train/prejepa.py output_model_name=oawc_swm_prejepa_tworoom_seed0_smoke subdir=oawc_swm_prejepa_tworoom_seed0_smoke seed=0 cache_dir=/Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache wandb.enabled=false dataset_name=tworoom batch_size=2 num_workers=0 trainer.max_epochs=1 trainer.accelerator=cpu trainer.devices=1 trainer.precision=32 +trainer.limit_train_batches=2 +trainer.limit_val_batches=2",
+  "command_display": "/Users/danielenriquez/projects/operator-aware-world-model-compression/.venv/bin/python3 /Users/danielenriquez/projects/operator-aware-world-model-compression/external/stable-worldmodel/scripts/train/prejepa.py output_model_name=oawc_swm_prejepa_tworoom_seed0_smoke subdir=oawc_swm_prejepa_tworoom_seed0_smoke seed=0 cache_dir=/Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache wandb.enabled=false dataset_name=tworoom.h5 batch_size=2 num_workers=0 trainer.max_epochs=1 trainer.accelerator=cpu trainer.devices=1 trainer.precision=32 +trainer.limit_train_batches=2 +trainer.limit_val_batches=2",
   "working_directory": "/Users/danielenriquez/projects/operator-aware-world-model-compression/external/stable-worldmodel/scripts/train",
   "stablewm_home": "/Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache",
   "pythonpath": "/Users/danielenriquez/projects/operator-aware-world-model-compression/external/stable-worldmodel:/Users/danielenriquez/projects/operator-aware-world-model-compression/src:/Users/danielenriquez/projects/operator-aware-world-model-compression/external/stable-worldmodel:/Users/danielenriquez/projects/operator-aware-world-model-compression/src",
   "artifacts_discovered": {
     "pretrained_dir": "/Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache/checkpoints/oawc_swm_prejepa_tworoom_seed0_smoke",
-    "pretrained_files": [],
+    "pretrained_files": [
+      "/Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache/checkpoints/oawc_swm_prejepa_tworoom_seed0_smoke/config.yaml"
+    ],
     "object_dir": "/Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache/checkpoints/oawc_swm_prejepa_tworoom_seed0_smoke",
-    "object_files": [],
+    "object_files": [
+      "/Users/danielenriquez/projects/operator-aware-world-model-compression/.swm_cache/checkpoints/oawc_swm_prejepa_tworoom_seed0_smoke/config.yaml"
+    ],
     "object_ckpts": [],
     "weights_pt": []
   },
-  "copy_artifacts": false,
-  "copied_local": [],
+  "copy_artifacts": true,
+  "copied_local": [
+    "/Users/danielenriquez/projects/operator-aware-world-model-compression/checkpoints/swm_prejepa/tworoom/oawc_swm_prejepa_tworoom_seed0_smoke/config.yaml",
+    "/Users/danielenriquez/projects/operator-aware-world-model-compression/checkpoints/swm_prejepa/tworoom/oawc_swm_prejepa_tworoom_seed0_smoke/config.yaml"
+  ],
   "copied_drive": [],
   "notes": "Reproduction checkpoint using upstream SWM PreJEPA training script."
 }
