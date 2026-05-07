@@ -129,28 +129,47 @@ def get_dataset_name(env_name: str) -> str:
 def load_hdf5_dataset(
     env_name: str,
     *,
-    dataset_name: str | None = None,
-    cache_dir: str | Path | None = None,
-    keys_to_cache: list[str] | None = None,
-    frameskip: int = 1,
-    num_steps: int = 1,
-) -> swm.data.HDF5Dataset:
+    keys_to_load: list[str] | None = None,
+):
     """
-    Load the official SWM HDF5 benchmark dataset for an environment.
+    Load the official SWM/LeWM HDF5 dataset for an environment.
 
-    This intentionally uses HDF5Dataset because the installed SWM version does not
-    expose swm.data.load_dataset, and external/le-wm/eval.py also uses HDF5Dataset.
+    Important:
+      Do NOT cache pixels. The official datasets are large; caching pixels can
+      require >100GB RAM. We only cache small indexing columns needed for
+      deterministic dataset-driven evaluation.
     """
-    dataset_name = dataset_name or get_dataset_name(env_name)
-    cache_dir = Path(cache_dir or swm.data.utils.get_cache_dir())
-    keys_to_cache = keys_to_cache or DEFAULT_KEYS_TO_CACHE[env_name]
+    import os
+    from pathlib import Path
+
+    import h5py
+    import stable_worldmodel as swm
+
+    dataset_name = get_dataset_name(env_name)
+
+    root = Path(os.environ.get("STABLEWM_HOME", Path.home() / ".stable_worldmodel"))
+    h5_path = root / f"{dataset_name}.h5"
+
+    if not h5_path.exists():
+        raise FileNotFoundError(
+            f"Missing dataset file: {h5_path}\n"
+            f"Run scripts/fetch_lewm_datasets.py for env={env_name}."
+        )
+
+    with h5py.File(h5_path, "r") as f:
+        available = set(f.keys())
+
+    # Small columns only. Never cache pixels/action/state.
+    keys_to_cache = [
+        k for k in ["ep_idx", "episode_idx", "step_idx"]
+        if k in available
+    ]
 
     return swm.data.HDF5Dataset(
         dataset_name,
-        frameskip=frameskip,
-        num_steps=num_steps,
+        keys_to_load=keys_to_load,
         keys_to_cache=keys_to_cache,
-        cache_dir=cache_dir,
+        cache_dir=root,
     )
 
 
