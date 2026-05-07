@@ -61,7 +61,12 @@ ENV_SPECS: dict[str, EnvSpec] = {
     "pusht": EnvSpec(
         name="pusht",
         env_id="swm/PushT-v1",
-        history_size=3,
+
+        # Matches external/le-wm/config/eval/pusht.yaml.
+        history_size=1,
+        frame_skip=1,
+        action_block=5,
+
         action_dim=2,
         observation_kind="dict_state_proprio",
         eval_budget_steps=50,
@@ -72,7 +77,12 @@ ENV_SPECS: dict[str, EnvSpec] = {
     "ogbench_cube": EnvSpec(
         name="ogbench_cube",
         env_id="swm/OGBCube-v0",
-        history_size=3,
+
+        # Matches external/le-wm/config/eval/cube.yaml.
+        history_size=1,
+        frame_skip=1,
+        action_block=5,
+
         action_dim=5,
         observation_kind="low_dim_state",
         eval_budget_steps=50,
@@ -112,6 +122,22 @@ def make_world(
     """
     spec = get_env_spec(env_name)
 
+    env_kwargs = dict(kwargs)
+
+    if env_name == "ogbench_cube":
+        # Matches external/le-wm/config/eval/cube.yaml.
+        cube_defaults = {
+            "env_type": "single",
+            "ob_type": "states",
+            "multiview": False,
+            "width": 224,
+            "height": 224,
+            "visualize_info": False,
+            "terminate_at_goal": True,
+        }
+        cube_defaults.update(env_kwargs)
+        env_kwargs = cube_defaults
+
     return swm.World(
         spec.env_id,
         num_envs=num_envs,
@@ -122,7 +148,7 @@ def make_world(
         max_episode_steps=max_episode_steps or spec.eval_budget_steps,
         goal_conditioned=goal_conditioned,
         verbose=verbose,
-        **kwargs,
+        **env_kwargs,
     )
 
 
@@ -178,3 +204,71 @@ def get_dataset_eval_kwargs(env_name: str) -> dict[str, int]:
         "goal_offset": spec.goal_distance_steps,
         "eval_budget": spec.eval_budget_steps,
     }
+
+
+def get_eval_callables(env_name: str) -> list[dict[str, Any]] | None:
+    """
+    Official dataset-driven evaluation callables from external/le-wm/config/eval/*.yaml.
+
+    These are environment-specific simulator reset hooks used by
+    World.evaluate_from_dataset to replay a dataset state and set the reachable
+    goal state. Keeping them here prevents benchmark scripts from silently
+    diverging from the paper contract.
+    """
+    get_env_spec(env_name)  # validates name
+
+    if env_name == "tworoom":
+        return [
+            {
+                "method": "_set_state",
+                "args": {
+                    "state": {"value": "proprio"},
+                },
+            },
+            {
+                "method": "_set_goal_state",
+                "args": {
+                    "goal_state": {"value": "goal_proprio"},
+                },
+            },
+        ]
+
+    if env_name == "pusht":
+        return [
+            {
+                "method": "_set_state",
+                "args": {
+                    "state": {"value": "state"},
+                },
+            },
+            {
+                "method": "_set_goal_state",
+                "args": {
+                    "goal_state": {"value": "goal_state"},
+                },
+            },
+        ]
+
+    if env_name == "ogbench_cube":
+        return [
+            {
+                "method": "set_state",
+                "args": {
+                    "qpos": {"value": "qpos"},
+                    "qvel": {"value": "qvel"},
+                },
+            },
+            {
+                "method": "set_target_pos",
+                "args": {
+                    "cube_id": {
+                        "value": 0,
+                        "in_dataset": False,
+                    },
+                    "target_pos": {"value": "goal_privileged_block_0_pos"},
+                    "target_quat": {"value": "goal_privileged_block_0_quat"},
+                },
+            },
+        ]
+
+    return None

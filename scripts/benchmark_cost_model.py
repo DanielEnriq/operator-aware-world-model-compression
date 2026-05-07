@@ -23,6 +23,7 @@ from oawc.benchmark import (
 from oawc.envs import (
     ENV_SPECS,
     get_cem_solver_kwargs,
+    get_eval_callables,
     get_planning_config_kwargs,
     make_world,
 )
@@ -270,27 +271,7 @@ def run_cost_model_benchmark(
         torch.cuda.reset_peak_memory_stats()
 
     start_time = time.time()
-    eval_callables = None
-    if env_name == "tworoom":
-        # Matches external/le-wm/config/eval/tworoom.yaml.
-        eval_callables = [
-            {
-                "method": "_set_state",
-                "args": {
-                    "state": {
-                        "value": "proprio",
-                    },
-                },
-            },
-            {
-                "method": "_set_goal_state",
-                "args": {
-                    "goal_state": {
-                        "value": "goal_proprio",
-                    },
-                },
-            },
-        ]
+    eval_callables = get_eval_callables(env_name)
 
     metrics = world.evaluate_from_dataset(
         dataset,
