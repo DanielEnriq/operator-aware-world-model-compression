@@ -124,3 +124,47 @@ PreJEPA workflow.
   --device cpu \
   --smoke-planner
 ```
+
+## 13) Build/check operator cache scaffold (teacher operator dataset)
+
+This stage builds fixed-candidate teacher costs/rankings for operator-aware
+compression research. It does not perform compression yet.
+
+- Installed-SWM LeWM lane:
+```bash
+!export PYTHONPATH="$PWD/src" && \
+export STABLEWM_HOME="$PWD/.swm_cache" && \
+uv run python scripts/build_operator_cache.py \
+  --env tworoom \
+  --model-family lewm_hf \
+  --checkpoint quentinll/lewm-tworooms \
+  --num-states 4 \
+  --num-candidates 16 \
+  --horizon 5 \
+  --topk 1 5 10 \
+  --seed 0 \
+  --device cpu \
+  --tag lewm_tworoom_smoke && \
+uv run python scripts/check_operator_cache.py \
+  outputs/operator_cache/tworoom/lewm_tworoom_smoke/operator_cache.pt
+```
+
+- Source-SWM PreJEPA lane:
+```bash
+!export PYTHONPATH="$PWD/external/stable-worldmodel:$PWD/src" && \
+export STABLEWM_HOME="$PWD/.swm_cache" && \
+uv run python scripts/build_operator_cache.py \
+  --env tworoom \
+  --model-family swm_auto \
+  --checkpoint oawc_swm_prejepa_tworoom_seed0_smoke \
+  --source-swm \
+  --num-states 4 \
+  --num-candidates 16 \
+  --horizon 5 \
+  --topk 1 5 10 \
+  --seed 0 \
+  --device cpu \
+  --tag prejepa_tworoom_smoke && \
+uv run python scripts/check_operator_cache.py \
+  outputs/operator_cache/tworoom/prejepa_tworoom_smoke/operator_cache.pt
+```

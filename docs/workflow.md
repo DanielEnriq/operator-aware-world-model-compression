@@ -36,7 +36,16 @@ Notes:
    - `uv run python scripts/train_world_model.py --family swm_pldm --env tworoom --mode full --device cuda`
 7. Benchmark source-trained model (source-SWM lane).
    - `uv run python scripts/benchmark_source_swm_checkpoint.py --env tworoom --checkpoint oawc_swm_prejepa_tworoom_seed0 --tag swm_prejepa_tworoom_seed0 --num-eval 50 --seed 0 --device cuda`
-8. Compress model (project-specific compression path).
-9. Benchmark compressed model.
-10. Summarize results.
+8. Build teacher operator cache (stage-1 operator-aware scaffold, no compression yet).
+   - Installed-SWM LeWM cache:
+     - `export PYTHONPATH="$PWD/src"`
+     - `uv run python scripts/build_operator_cache.py --env tworoom --model-family lewm_hf --checkpoint quentinll/lewm-tworooms --num-states 4 --num-candidates 16 --horizon 5 --topk 1 5 10 --seed 0 --device cpu --tag lewm_tworoom_smoke`
+     - `uv run python scripts/check_operator_cache.py outputs/operator_cache/tworoom/lewm_tworoom_smoke/operator_cache.pt`
+   - Source-SWM PreJEPA cache:
+     - `export PYTHONPATH="$PWD/external/stable-worldmodel:$PWD/src"`
+     - `uv run python scripts/build_operator_cache.py --env tworoom --model-family swm_auto --checkpoint oawc_swm_prejepa_tworoom_seed0_smoke --source-swm --num-states 4 --num-candidates 16 --horizon 5 --topk 1 5 10 --seed 0 --device cpu --tag prejepa_tworoom_smoke`
+     - `uv run python scripts/check_operator_cache.py outputs/operator_cache/tworoom/prejepa_tworoom_smoke/operator_cache.pt`
+9. Compress model (project-specific compression path).
+10. Benchmark compressed model.
+11. Summarize results.
    - `uv run python scripts/summarize_benchmarks.py`
