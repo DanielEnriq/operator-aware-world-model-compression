@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import torch
 import stable_worldmodel as swm
 
 from oawc.models.registry import LoadedCostModel, register_model_loader
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+LEWM_SRC = PROJECT_ROOT / "external" / "le-wm"
+
+
+def _ensure_lewm_source_on_path() -> None:
+    if LEWM_SRC.exists() and str(LEWM_SRC) not in sys.path:
+        sys.path.insert(0, str(LEWM_SRC))
 
 
 @register_model_loader("lewm_hf")
@@ -88,14 +100,21 @@ def load_torch_file(
     device: str | torch.device,
 ) -> LoadedCostModel:
     del env_name, device
+    _ensure_lewm_source_on_path()
     loaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if isinstance(loaded, torch.nn.Module):
         model = loaded
+        source = "torch.load(nn.Module)"
     else:
         model = getattr(loaded, "model", loaded)
+        source = (
+            "torch.load(container.model)"
+            if hasattr(loaded, "model")
+            else "torch.load(raw_object)"
+        )
     return LoadedCostModel(
         model=model,
         family="torch_file",
         checkpoint=checkpoint,
-        source="torch.load",
+        source=source,
     )

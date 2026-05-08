@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import stable_pretraining as spt
 import stable_worldmodel as swm
 from sklearn import preprocessing
@@ -193,6 +194,74 @@ def model_size_bytes(module: torch.nn.Module) -> int:
     return int(sum(p.numel() * p.element_size() for p in module.parameters()))
 
 
+def _compute_cost_with_fallback(
+    model: torch.nn.Module,
+    info_dict: dict[str, torch.Tensor],
+    action_candidates: torch.Tensor,
+) -> torch.Tensor:
+    goal = {k: v[:, 0] for k, v in info_dict.items() if torch.is_tensor(v)}
+    goal["pixels"] = goal["goal"]
+    for key in list(goal.keys()):
+        if key.startswith("goal_"):
+            goal[key[len("goal_"):]] = goal.pop(key)
+    goal.pop("action", None)
+    goal = model.encode(goal)
+    goal_emb = goal["emb"]
+
+    rollout_input = dict(info_dict)
+    rollout_input["goal_emb"] = goal_emb
+    rollout_output = model.rollout(rollout_input, action_candidates)
+    pred_emb = rollout_output["predicted_emb"]
+
+    while goal_emb.ndim < pred_emb.ndim:
+        goal_emb = goal_emb.unsqueeze(1)
+    goal_emb = goal_emb[..., -1:, :].expand_as(pred_emb)
+    return F.mse_loss(
+        pred_emb[..., -1:, :],
+        goal_emb[..., -1:, :].detach(),
+        reduction="none",
+    ).sum(dim=tuple(range(2, pred_emb.ndim)))
+
+
+def _configure_cost_interface(
+    model: torch.nn.Module,
+) -> tuple[torch.nn.Module, str]:
+    if callable(getattr(model, "get_cost", None)):
+        return model, "get_cost"
+
+    if callable(getattr(model, "cost", None)):
+        model.get_cost = model.cost  # type: ignore[attr-defined]
+        return model, "cost"
+
+    if callable(getattr(model, "forward", None)):
+        model.get_cost = model.forward  # type: ignore[attr-defined]
+        return model, "forward"
+
+    if callable(getattr(model, "rollout", None)) and callable(
+        getattr(model, "encode", None)
+    ):
+        def _fallback_get_cost(
+            info_dict: dict[str, torch.Tensor],
+            action_candidates: torch.Tensor,
+            _model: torch.nn.Module = model,
+        ) -> torch.Tensor:
+            return _compute_cost_with_fallback(
+                _model,
+                info_dict,
+                action_candidates,
+            )
+
+        model.get_cost = (  # type: ignore[attr-defined]
+            _fallback_get_cost
+        )
+        return model, "fallback"
+
+    raise TypeError(
+        "Loaded model has no usable cost interface for closed-loop planning. "
+        "Expected one of: get_cost, cost, forward, or (encode+rollout fallback)."
+    )
+
+
 def make_world_model_policy(
     *,
     env_name: str,
@@ -281,7 +350,7 @@ def run_cost_model_benchmark(
         env_name=env_name,
         device=device,
     )
-    model = loaded_model.model
+    model, cost_interface = _configure_cost_interface(loaded_model.model)
 
     policy = make_world_model_policy(
         env_name=env_name,
@@ -338,6 +407,8 @@ def run_cost_model_benchmark(
             "family": model_family,
             "checkpoint": checkpoint,
             "model_path": model_path,
+            "loader_source": loaded_model.source,
+            "cost_interface": cost_interface,
             "compression": None,
             "is_cost_model": True,
         },
