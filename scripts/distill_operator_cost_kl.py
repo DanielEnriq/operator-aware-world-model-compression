@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         default="val_loss",
         choices=["val_spearman", "val_top5", "val_regret", "val_loss"],
     )
+    parser.add_argument(
+        "--early-stop-metric",
+        default=None,
+        choices=["spearman", "top5", "regret", "loss"],
+    )
+    parser.add_argument("--save-best-by-val", action="store_true")
     parser.add_argument("--restore-best-on-failure", action="store_true")
     parser.add_argument(
         "--no-restore-best-on-failure",
@@ -266,9 +272,19 @@ def _is_better_checkpoint(
 
 def main() -> None:
     args = parse_args()
+    if args.early_stop_metric is not None:
+        args.save_best_by = {
+            "spearman": "val_spearman",
+            "top5": "val_top5",
+            "regret": "val_regret",
+            "loss": "val_loss",
+        }[str(args.early_stop_metric)]
+    if args.save_best_by_val and args.early_stop_metric is None:
+        args.save_best_by = "val_top5"
     device = resolve_device(args.device)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
+    run_start = time.time()
 
     out_dir = Path(args.output_root) / args.env / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -617,13 +633,17 @@ def main() -> None:
         "normalize_costs": args.normalize_costs,
         "trainable_substring": args.trainable_substring,
         "max_steps": int(args.max_steps),
+        "distill_steps": int(args.max_steps),
         "batch_size": int(args.batch_size),
+        "train_states": int(train_n_states),
+        "train_candidates": int(train_n_candidates),
         "val_states": int(val_count),
         "val_candidates": (
             int(args.val_candidates) if args.val_candidates is not None else None
         ),
         "save_best_by": args.save_best_by,
         "lr": float(args.lr),
+        "optimizer": "AdamW",
         "weight_decay": float(args.weight_decay),
         "grad_clip": float(args.grad_clip),
         "num_trainable_params": int(num_trainable),
@@ -648,6 +668,14 @@ def main() -> None:
         "teacher_distribution_entropy_mean": teacher_entropy_mean,
         "final_student_distribution_entropy_mean": final_student_entropy_mean,
         "run_success": run_success,
+        "wall_time_sec": float(time.time() - run_start),
+        "approx_candidate_sequences_consumed": int(
+            int(args.max_steps) * int(args.batch_size) * int(train_n_candidates)
+        ),
+        "teacher_labels_used": int(
+            int(args.max_steps) * int(args.batch_size) * int(train_n_candidates)
+        ),
+        "validation_cache_used": str(eval_cache_path),
         "distilled_model_path": str(distilled_path) if run_success else None,
         "inherited_compression": inherited,
     }

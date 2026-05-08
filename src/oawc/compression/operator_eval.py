@@ -44,6 +44,11 @@ def load_operator_cache(
     )
 
 
+def rank_fraction_to_tag(rank_fraction: float) -> str:
+    scaled = int(round(float(rank_fraction) * 100))
+    return f"r{scaled:03d}"
+
+
 def _stats(x: torch.Tensor) -> dict[str, float]:
     return {
         "min": float(x.min()),
@@ -404,6 +409,12 @@ def evaluate_model_on_operator_cache(
         "metrics": metrics,
         "metadata": {
             "cache_path": str(cache.path),
+            "env": str(payload.get("env")),
+            "cache_seed": (
+                int(payload["seed"])
+                if payload.get("seed") is not None
+                else None
+            ),
             "model_path": str(model_path) if model_path is not None else None,
             "device": device,
             "state_count": int(state_idx.shape[0]),

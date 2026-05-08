@@ -51,6 +51,11 @@ def main() -> None:
         "cache_path": str(cache_path),
         "model_path": str(Path(args.model_path)),
         "device": device,
+        "source_of_truth": (
+            "canonical_random_operator_eval:"
+            " evaluate_operator_metrics.py via shared operator_eval.py"
+        ),
+        "evaluation_metadata": result["metadata"],
         **metrics_core,
     }
     save_json(out_path, metrics)

@@ -78,3 +78,21 @@ def load_swm_pretrained(
         checkpoint=checkpoint,
         source="stable_worldmodel.wm.utils.load_pretrained",
     )
+
+
+@register_model_loader("torch_file")
+def load_torch_file(
+    *,
+    checkpoint: str,
+    env_name: str,
+    device: str | torch.device,
+) -> LoadedCostModel:
+    del env_name, device
+    model = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    model = getattr(model, "model", model)
+    return LoadedCostModel(
+        model=model,
+        family="torch_file",
+        checkpoint=checkpoint,
+        source="torch.load",
+    )

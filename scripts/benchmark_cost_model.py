@@ -63,6 +63,36 @@ def to_jsonable(x: Any) -> Any:
     return x
 
 
+def _load_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _model_report_metadata(model_path: str | None) -> dict[str, Any] | None:
+    if model_path is None:
+        return None
+    p = Path(model_path)
+    parent = p.parent
+    compression = _load_optional_json(parent / "compression_report.json")
+    distill = _load_optional_json(parent / "distillation_report.json")
+    return {
+        "compression_report": compression,
+        "distillation_report": distill,
+        "compression_report_path": (
+            str(parent / "compression_report.json")
+            if (parent / "compression_report.json").exists()
+            else None
+        ),
+        "distillation_report_path": (
+            str(parent / "distillation_report.json")
+            if (parent / "distillation_report.json").exists()
+            else None
+        ),
+    }
+
+
 def imagenet_transform(img_size: int = 224):
     """
     Same image preprocessing pattern used in external/le-wm/eval.py:
@@ -222,6 +252,7 @@ def run_cost_model_benchmark(
     device: str,
     save_video: bool,
     output_dir: Path,
+    model_path: str | None = None,
 ) -> dict[str, Any]:
     if env_name not in ENV_SPECS:
         raise KeyError(f"Unknown env={env_name}. Valid envs: {sorted(ENV_SPECS)}")
@@ -306,6 +337,7 @@ def run_cost_model_benchmark(
             "name": tag,
             "family": model_family,
             "checkpoint": checkpoint,
+            "model_path": model_path,
             "compression": None,
             "is_cost_model": True,
         },
@@ -373,6 +405,7 @@ def run_cost_model_benchmark(
             "as external/le-wm/eval.py. This benchmark intentionally reports only "
             "control and efficiency metrics, not representation probing or VoE metrics."
         ),
+        "model_reports": _model_report_metadata(model_path),
     }
 
     return to_jsonable(result)
@@ -392,7 +425,8 @@ def main() -> None:
             f"Available: {', '.join(families)}."
         ),
     )
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--model-path", default=None)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--num-eval", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
@@ -401,6 +435,14 @@ def main() -> None:
     parser.add_argument("--output-dir", default=None)
 
     args = parser.parse_args()
+    if args.model_path is not None:
+        model_family = "torch_file"
+        checkpoint = str(Path(args.model_path))
+    else:
+        if args.checkpoint is None:
+            raise ValueError("Provide --checkpoint or --model-path.")
+        model_family = args.model_family
+        checkpoint = args.checkpoint
 
     output_dir = (
         Path(args.output_dir)
@@ -410,14 +452,15 @@ def main() -> None:
 
     result = run_cost_model_benchmark(
         env_name=args.env,
-        model_family=args.model_family,
-        checkpoint=args.checkpoint,
+        model_family=model_family,
+        checkpoint=checkpoint,
         tag=args.tag,
         num_eval=args.num_eval,
         seed=args.seed,
         device=args.device,
         save_video=args.save_video,
         output_dir=output_dir,
+        model_path=args.model_path,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -428,8 +471,8 @@ def main() -> None:
 
     print("\nCost-model benchmark complete")
     print(f"  env:          {args.env}")
-    print(f"  model_family: {args.model_family}")
-    print(f"  checkpoint:   {args.checkpoint}")
+    print(f"  model_family: {model_family}")
+    print(f"  checkpoint:   {checkpoint}")
     print(f"  tag:          {args.tag}")
     print(f"  num_eval:     {args.num_eval}")
     print(f"  seed:         {args.seed}")
