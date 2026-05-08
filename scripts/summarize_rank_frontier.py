@@ -114,6 +114,10 @@ def main() -> None:
     pred_root = Path("outputs/prediction_rollout") / args.env
     out_root = Path("outputs/tables")
     out_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = out_root / "rank_frontier_run_manifest_tworoom.json"
+    manifest = _read_json(manifest_path) if manifest_path.exists() else {}
+    identity_ok = manifest.get("identity_check_passed")
+    teacher_anchor_source = manifest.get("teacher_anchor_source")
 
     compression_reports: dict[str, dict[str, Any]] = {}
     for p in compression_root.glob("*/compression_report.json"):
@@ -263,9 +267,17 @@ def main() -> None:
                 else None
             ),
             "closed_loop_eval_path": None,
+            "identity_check_passed": identity_ok,
+            "teacher_anchor_source": teacher_anchor_source,
             "status": "ok" if random_metrics is not None else "partial",
             "notes": ";".join(notes),
         }
+        if identity_ok is False:
+            row["status"] = "INVALID_FRONTIER"
+            row["notes"] = (
+                (row["notes"] + ";" if row["notes"] else "")
+                + "INVALID_FRONTIER: no-compression identity check failed."
+            )
         rows.append(row)
 
     rows.sort(
@@ -296,6 +308,8 @@ def main() -> None:
         "raw_cost_mse_random",
         "closed_loop_success_rate",
         "prediction_rollout_error",
+        "identity_check_passed",
+        "teacher_anchor_source",
         "status",
         "notes",
     ]
@@ -320,6 +334,8 @@ def main() -> None:
             ),
             "closed_loop_eval": "scripts/benchmark_cost_model.py",
         },
+        "identity_check_passed": identity_ok,
+        "teacher_anchor_source": teacher_anchor_source,
         "rows": rows,
     }
     json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

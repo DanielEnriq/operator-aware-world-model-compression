@@ -12,7 +12,10 @@ from typing import Any
 
 import torch
 
-from oawc.compression.operator_eval import rank_fraction_to_tag
+from oawc.compression.operator_eval import (
+    evaluate_model_on_operator_cache,
+    rank_fraction_to_tag,
+)
 from oawc.compression.reports import count_parameters, save_json
 from oawc.models import load_cost_model
 
@@ -192,6 +195,9 @@ def main() -> None:
     parser.add_argument("--distill-steps", type=int, default=100)
     parser.add_argument("--distill-batch-size", type=int, default=8)
     parser.add_argument("--distill-lr", type=float, default=1e-5)
+    parser.add_argument("--identity-min-spearman", type=float, default=0.99)
+    parser.add_argument("--identity-max-mse", type=float, default=1e-3)
+    parser.add_argument("--identity-min-top1", type=float, default=0.99)
     args = parser.parse_args()
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
@@ -209,6 +215,9 @@ def main() -> None:
         "rank_fractions": ranks,
         "eval_cache": args.eval_cache,
         "train_cache": args.train_cache,
+        "teacher_anchor_source": "local_artifact",
+        "identity_check_passed": False,
+        "identity_details": None,
         "runs": [],
     }
 
@@ -250,6 +259,70 @@ def main() -> None:
                     "compressed_model_path": str(teacher_model_path),
                 },
             )
+        if not args.dry_run:
+            hf_loaded = load_cost_model(
+                family="lewm_hf",
+                checkpoint=args.teacher_checkpoint,
+                env_name=args.env,
+                device="cpu",
+            )
+            hf_result = evaluate_model_on_operator_cache(
+                cache_path=args.eval_cache,
+                model=hf_loaded.model.to("cpu").eval(),
+                model_path=args.teacher_checkpoint,
+                device="cpu",
+                use_chunked_student=False,
+            )
+            local_result = evaluate_model_on_operator_cache(
+                cache_path=args.eval_cache,
+                model_path=str(teacher_model_path),
+                device="cpu",
+                use_chunked_student=False,
+            )
+            ident = {
+                "hf_direct": {
+                    "raw_cost_mse": float(hf_result["metrics"]["raw_cost_mse"]),
+                    "spearman_mean": float(
+                        hf_result["metrics"]["spearman_per_state"]["mean"]
+                    ),
+                    "top1_match_rate": float(
+                        hf_result["metrics"]["teacher_best_index_match_rate"]
+                    ),
+                },
+                "local_artifact": {
+                    "raw_cost_mse": float(local_result["metrics"]["raw_cost_mse"]),
+                    "spearman_mean": float(
+                        local_result["metrics"]["spearman_per_state"]["mean"]
+                    ),
+                    "top1_match_rate": float(
+                        local_result["metrics"]["teacher_best_index_match_rate"]
+                    ),
+                },
+            }
+            passed = bool(
+                ident["local_artifact"]["spearman_mean"]
+                >= float(args.identity_min_spearman)
+                and ident["local_artifact"]["raw_cost_mse"]
+                <= float(args.identity_max_mse)
+                and ident["local_artifact"]["top1_match_rate"]
+                >= float(args.identity_min_top1)
+            )
+            manifest["identity_details"] = ident
+            manifest["identity_check_passed"] = passed
+            if not passed:
+                out_path = Path(
+                    "outputs/tables/rank_frontier_run_manifest_tworoom.json"
+                )
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(
+                    json.dumps(manifest, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                raise RuntimeError(
+                    "Identity invariant failed for local teacher r100 artifact: "
+                    f"{ident['local_artifact']}. "
+                    "Aborting frontier run."
+                )
         teacher_eval_tag = "lewm_tworoom_teacher_r100_eval_s128_seed1"
         teacher_metrics = (
             Path("outputs/operator_metrics") / args.env / teacher_eval_tag / "metrics.json"

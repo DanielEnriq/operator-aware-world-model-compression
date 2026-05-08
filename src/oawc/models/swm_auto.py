@@ -88,8 +88,11 @@ def load_torch_file(
     device: str | torch.device,
 ) -> LoadedCostModel:
     del env_name, device
-    model = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    model = getattr(model, "model", model)
+    loaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if isinstance(loaded, torch.nn.Module):
+        model = loaded
+    else:
+        model = getattr(loaded, "model", loaded)
     return LoadedCostModel(
         model=model,
         family="torch_file",

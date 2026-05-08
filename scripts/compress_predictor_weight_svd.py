@@ -219,6 +219,9 @@ def main() -> None:
         "num_layers_considered": int(len(linear_entries)),
         "num_layers_compressed": int(compressed_count),
         "num_layers_skipped": int(skipped_count),
+        "compression_status": (
+            "no_op" if int(compressed_count) == 0 else "compressed"
+        ),
         "total_params_before": int(total_before),
         "total_params_after": int(total_after),
         "predictor_params_before": int(predictor_before),

@@ -240,7 +240,12 @@ def load_model_from_path(model_path: str | Path, device: str) -> torch.nn.Module
         sys.path.insert(0, str(lewm_src))
 
     loaded = torch.load(model_path, map_location="cpu", weights_only=False)
-    model = getattr(loaded, "model", loaded)
+    # Only unwrap container objects; avoid accidentally selecting a submodule
+    # named "model" from a real torch.nn.Module.
+    if isinstance(loaded, torch.nn.Module):
+        model = loaded
+    else:
+        model = getattr(loaded, "model", loaded)
     if not hasattr(model, "get_cost"):
         raise TypeError(f"Loaded object from {model_path} does not expose get_cost().")
     model = model.to(device).eval()

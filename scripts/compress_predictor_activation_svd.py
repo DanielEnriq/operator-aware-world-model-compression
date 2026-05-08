@@ -480,6 +480,9 @@ def main() -> None:
         "num_layers_considered": int(len(layer_names)),
         "num_layers_compressed": int(num_compressed),
         "num_layers_skipped": int(num_skipped),
+        "compression_status": (
+            "no_op" if int(num_compressed) == 0 else "compressed"
+        ),
         "total_params_before": int(total_before),
         "total_params_after": int(total_after),
         "predictor_params_before": int(predictor_before),
@@ -534,6 +537,8 @@ def main() -> None:
     print(
         "  mean relative activation error:    "
         f"{compression_report['mean_relative_activation_output_error']:.6f}"
+        if compression_report["mean_relative_activation_output_error"] is not None
+        else "  mean relative activation error:    n/a (no layers compressed)"
     )
     print(f"  compressed model:                  {compressed_model_path}")
 
