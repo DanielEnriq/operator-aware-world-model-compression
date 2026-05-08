@@ -38,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distill-steps", type=int, default=100)
     parser.add_argument("--distill-batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--cost-batch-states", type=int, default=8)
+    parser.add_argument("--cost-batch-candidates", type=int, default=128)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--only", default=None)
@@ -86,7 +88,11 @@ def _copy_path(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def _stage_enabled(stage_key: str, stage_letter: str, only: str | None) -> bool:
+def _stage_enabled(
+    stage_key: str,
+    stage_letter: str,
+    only: str | None,
+) -> bool:
     if only is None:
         return True
     only_norm = only.strip().lower()
@@ -249,6 +255,10 @@ def main() -> None:
                 train_tag,
                 "--split",
                 "train",
+                "--cost-batch-states",
+                str(args.cost_batch_states),
+                "--cost-batch-candidates",
+                str(args.cost_batch_candidates),
             ],
             env=env,
             dry_run=args.dry_run,
@@ -286,6 +296,10 @@ def main() -> None:
                 eval_tag,
                 "--split",
                 "eval",
+                "--cost-batch-states",
+                str(args.cost_batch_states),
+                "--cost-batch-candidates",
+                str(args.cost_batch_candidates),
             ],
             env=env,
             dry_run=args.dry_run,
@@ -678,7 +692,10 @@ def main() -> None:
         ]
         for tag, eval_tag_name in eval_jobs:
             model_path = (
-                Path("outputs/compression") / args.env / tag / "distilled_model.pt"
+                Path("outputs/compression")
+                / args.env
+                / tag
+                / "distilled_model.pt"
             )
             if not model_path.exists() and not args.dry_run:
                 print(f"[skip] no distilled model for {tag}: {model_path}")
@@ -690,7 +707,10 @@ def main() -> None:
                 / "metrics.json"
             )
             if args.skip_existing and out_metrics.exists():
-                print(f"[skip] held-out distilled metrics exist: {out_metrics}")
+                print(
+                    "[skip] held-out distilled metrics exist: "
+                    f"{out_metrics}"
+                )
                 continue
             ok, _ = _run_command(
                 [

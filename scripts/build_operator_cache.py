@@ -25,6 +25,10 @@ from oawc.envs import ENV_SPECS
 from oawc.models import load_cost_model
 
 
+def _str2bool(v: str) -> bool:
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _to_jsonable(x: Any) -> Any:
     if isinstance(x, dict):
         return {str(k): _to_jsonable(v) for k, v in x.items()}
@@ -298,11 +302,7 @@ def _compute_cost_with_jepa_fallback(
 ) -> torch.Tensor:
     # This mirrors JEPA.get_cost but handles goal embedding expansion robustly
     # for models that produce goal_emb with shape [B, T, D].
-    copied = {}
-    for key, value in info_dict.items():
-        copied[key] = value.clone() if torch.is_tensor(value) else value
-
-    goal = {k: v[:, 0] for k, v in copied.items() if torch.is_tensor(v)}
+    goal = {k: v[:, 0] for k, v in info_dict.items() if torch.is_tensor(v)}
     goal["pixels"] = goal["goal"]
     for key in list(goal.keys()):
         if key.startswith("goal_"):
@@ -311,9 +311,10 @@ def _compute_cost_with_jepa_fallback(
     goal = model.encode(goal)
     goal_emb = goal["emb"]
 
-    copied["goal_emb"] = goal_emb
-    copied = model.rollout(copied, action_candidates)
-    pred_emb = copied["predicted_emb"]
+    rollout_input = dict(info_dict)
+    rollout_input["goal_emb"] = goal_emb
+    rollout_output = model.rollout(rollout_input, action_candidates)
+    pred_emb = rollout_output["predicted_emb"]
 
     # Expand goal embeddings across samples/time when needed.
     while goal_emb.ndim < pred_emb.ndim:
@@ -349,6 +350,112 @@ def _compute_teacher_costs(
         raise
 
 
+def _compute_teacher_costs_chunked(
+    *,
+    model: torch.nn.Module,
+    info_dict_cpu: dict[str, torch.Tensor],
+    candidate_actions_cpu: torch.Tensor,
+    cost_batch_states: int,
+    cost_batch_candidates: int,
+    empty_cache_between_batches: bool,
+    device: str,
+) -> torch.Tensor:
+    num_states = int(candidate_actions_cpu.shape[0])
+    num_candidates = int(candidate_actions_cpu.shape[1])
+    teacher_costs_cpu = torch.empty(
+        (num_states, num_candidates),
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    state_bs = max(1, int(cost_batch_states))
+    cand_bs = max(1, int(cost_batch_candidates))
+    state_start = 0
+
+    while state_start < num_states:
+        curr_state_bs = min(state_bs, num_states - state_start)
+        state_slice = slice(state_start, state_start + curr_state_bs)
+
+        try:
+            cand_start = 0
+            while cand_start < num_candidates:
+                curr_cand_bs = min(cand_bs, num_candidates - cand_start)
+                cand_slice = slice(cand_start, cand_start + curr_cand_bs)
+
+                if torch.cuda.is_available() and device == "cuda":
+                    torch.cuda.reset_peak_memory_stats()
+
+                info_chunk = _slice_info_dict(info_dict_cpu, state_slice, device)
+                candidate_chunk = candidate_actions_cpu[state_slice, cand_slice].to(
+                    device
+                )
+                candidate_eval = _adapt_candidates_for_model(candidate_chunk, model)
+                expanded_info = _expand_info_for_candidates(
+                    info_chunk,
+                    num_candidates=curr_cand_bs,
+                )
+                costs_chunk = _compute_teacher_costs(
+                    model,
+                    expanded_info,
+                    candidate_eval,
+                )
+                teacher_costs_cpu[state_slice, cand_slice] = (
+                    costs_chunk.detach().to("cpu")
+                )
+
+                info_shapes = {k: list(v.shape) for k, v in info_chunk.items()}
+                peak_gib = _cuda_peak_gib()
+                print(
+                    "[cost-chunk] "
+                    f"states={state_slice.start}:{state_slice.stop} "
+                    f"cands={cand_slice.start}:{cand_slice.stop} "
+                    f"candidate_shape={list(candidate_eval.shape)} "
+                    f"cost_shape={list(costs_chunk.shape)} "
+                    f"cuda_peak_gib={peak_gib}"
+                )
+                print(f"[cost-chunk] info_shapes={info_shapes}")
+
+                del info_chunk
+                del candidate_chunk
+                del candidate_eval
+                del expanded_info
+                del costs_chunk
+                if (
+                    empty_cache_between_batches
+                    and torch.cuda.is_available()
+                    and device == "cuda"
+                ):
+                    torch.cuda.empty_cache()
+                cand_start += curr_cand_bs
+
+            state_start += curr_state_bs
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            is_oom = (
+                "out of memory" in msg
+                or "cuda out of memory" in msg
+                or "torch.outofmemoryerror" in msg
+            )
+            if not is_oom:
+                raise
+            if torch.cuda.is_available() and device == "cuda":
+                torch.cuda.empty_cache()
+            next_sizes = _oom_retry_batch_sizes(state_bs, cand_bs)
+            if next_sizes is None:
+                raise RuntimeError(
+                    "OOM persisted at cost_batch_states=1 and "
+                    "cost_batch_candidates=1. Cannot proceed."
+                ) from exc
+            state_bs, cand_bs = next_sizes
+            print(
+                "[oom-retry] lowering chunk sizes and retrying: "
+                f"cost_batch_states={state_bs}, "
+                f"cost_batch_candidates={cand_bs}"
+            )
+
+    return teacher_costs_cpu
+
+
 def _resolve_device(device_arg: str) -> str:
     if device_arg == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
@@ -358,6 +465,35 @@ def _resolve_device(device_arg: str) -> str:
             "Use --device cpu locally or run on Colab/H100."
         )
     return device_arg
+
+
+def _slice_info_dict(
+    info_dict: dict[str, torch.Tensor],
+    state_slice: slice,
+    device: str,
+) -> dict[str, torch.Tensor]:
+    sliced: dict[str, torch.Tensor] = {}
+    for key, value in info_dict.items():
+        item = value[state_slice]
+        sliced[key] = item.to(device)
+    return sliced
+
+
+def _oom_retry_batch_sizes(
+    state_bs: int,
+    cand_bs: int,
+) -> tuple[int, int] | None:
+    if state_bs > 1:
+        return max(1, state_bs // 2), cand_bs
+    if cand_bs > 1:
+        return state_bs, max(1, cand_bs // 2)
+    return None
+
+
+def _cuda_peak_gib() -> float | None:
+    if not torch.cuda.is_available():
+        return None
+    return float(torch.cuda.max_memory_allocated() / (1024**3))
 
 
 def main() -> None:
@@ -382,6 +518,13 @@ def main() -> None:
         default=None,
         choices=["train", "eval"],
         help="Optional cache split label stored in metadata/cache.",
+    )
+    parser.add_argument("--cost-batch-states", type=int, default=16)
+    parser.add_argument("--cost-batch-candidates", type=int, default=128)
+    parser.add_argument(
+        "--empty-cache-between-cost-batches",
+        type=_str2bool,
+        default=True,
     )
     args = parser.parse_args()
 
@@ -410,6 +553,11 @@ def main() -> None:
         "seed": args.seed,
         "source_swm": bool(args.source_swm),
         "split": args.split,
+        "cost_batch_states": int(args.cost_batch_states),
+        "cost_batch_candidates": int(args.cost_batch_candidates),
+        "empty_cache_between_cost_batches": bool(
+            args.empty_cache_between_cost_batches
+        ),
         "stablewm_home": str(stablewm_home),
         "project_root": str(project_root),
     }
@@ -463,17 +611,17 @@ def main() -> None:
             raise TypeError("Loaded teacher model does not expose get_cost().")
 
         print("[progress] preparing state/goal info dict")
-        info_dict = _build_info_dict(
+        info_dict_cpu = _build_info_dict(
             dataset=dataset,
             episodes_idx=episodes_idx,
             start_steps=start_steps,
             goal_offset_steps=goal_offset_steps,
-            device=device,
+            device="cpu",
         )
-        info_dict = _maybe_align_action_width(info_dict, model)
+        info_dict_cpu = _maybe_align_action_width(info_dict_cpu, model)
 
         action_dim = ENV_SPECS[args.env].action_dim or int(
-            info_dict["action"].shape[-1]
+            info_dict_cpu["action"].shape[-1]
         )
         metadata["action_dim"] = action_dim
 
@@ -484,26 +632,23 @@ def main() -> None:
             horizon=args.horizon,
             action_dim=action_dim,
             seed=args.seed,
-            device=device,
-        )
-        candidate_actions_eval = _adapt_candidates_for_model(
-            candidate_actions_raw,
-            model,
-        )
-        expanded_info = _expand_info_for_candidates(
-            info_dict,
-            num_candidates=args.num_candidates,
+            device="cpu",
         )
 
         print("[progress] evaluating teacher operator costs")
         with torch.no_grad():
-            teacher_costs = _compute_teacher_costs(
-                model,
-                expanded_info,
-                candidate_actions_eval,
+            teacher_costs = _compute_teacher_costs_chunked(
+                model=model,
+                info_dict_cpu=info_dict_cpu,
+                candidate_actions_cpu=candidate_actions_raw,
+                cost_batch_states=args.cost_batch_states,
+                cost_batch_candidates=args.cost_batch_candidates,
+                empty_cache_between_batches=(
+                    args.empty_cache_between_cost_batches
+                ),
+                device=device,
             )
-        teacher_costs = teacher_costs.detach().to("cpu")
-        candidate_actions_cpu = candidate_actions_raw.detach().to("cpu")
+        candidate_actions_cpu = candidate_actions_raw
 
         max_topk = max(args.topk)
         sorted_idx = torch.argsort(teacher_costs, dim=1)
