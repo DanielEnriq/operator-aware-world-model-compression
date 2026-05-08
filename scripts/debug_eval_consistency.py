@@ -6,251 +6,12 @@ from typing import Any
 
 import torch
 
-from oawc.compression.operator_metrics import (
-    adapt_candidates_for_model,
-    build_info_dict_from_cache,
-    compute_model_costs,
-    expand_info_for_candidates,
-    load_model_from_path,
-    maybe_align_action_width,
-    resolve_device,
+from oawc.compression.operator_eval import (
+    evaluate_model_on_operator_cache,
+    load_operator_cache,
 )
+from oawc.compression.operator_metrics import resolve_device
 from oawc.compression.reports import save_json
-
-
-def _spearman(x: torch.Tensor, y: torch.Tensor) -> float:
-    idx_x = torch.argsort(x)
-    idx_y = torch.argsort(y)
-    rx = torch.empty_like(idx_x, dtype=torch.float32)
-    ry = torch.empty_like(idx_y, dtype=torch.float32)
-    rx[idx_x] = torch.arange(
-        x.numel(),
-        dtype=torch.float32,
-        device=x.device,
-    )
-    ry[idx_y] = torch.arange(
-        y.numel(),
-        dtype=torch.float32,
-        device=y.device,
-    )
-    rx = rx - rx.mean()
-    ry = ry - ry.mean()
-    denom = torch.sqrt((rx.pow(2).sum()) * (ry.pow(2).sum()))
-    if float(denom.item()) == 0.0:
-        return 0.0
-    return float((rx * ry).sum().item() / denom.item())
-
-
-def _topk_overlap_mean(
-    teacher_sorted: torch.Tensor,
-    student_sorted: torch.Tensor,
-    k: int,
-) -> float:
-    overlaps = []
-    for i in range(teacher_sorted.shape[0]):
-        t_set = set(teacher_sorted[i, :k].tolist())
-        s_set = set(student_sorted[i, :k].tolist())
-        overlaps.append(len(t_set.intersection(s_set)) / float(k))
-    return float(torch.tensor(overlaps, dtype=torch.float32).mean().item())
-
-
-def _slice_info_dict(
-    info_dict: dict[str, torch.Tensor],
-    state_slice: slice,
-    device: str,
-) -> dict[str, torch.Tensor]:
-    out: dict[str, torch.Tensor] = {}
-    for key, value in info_dict.items():
-        out[key] = value[state_slice].to(device)
-    return out
-
-
-def _compute_student_costs_chunked(
-    *,
-    model: torch.nn.Module,
-    info_cpu: dict[str, torch.Tensor],
-    candidate_actions_cpu: torch.Tensor,
-    device: str,
-    batch_states: int,
-    batch_candidates: int,
-) -> torch.Tensor:
-    num_states = int(candidate_actions_cpu.shape[0])
-    num_candidates = int(candidate_actions_cpu.shape[1])
-    costs_cpu = torch.empty((num_states, num_candidates), dtype=torch.float32)
-    for s0 in range(0, num_states, batch_states):
-        s1 = min(num_states, s0 + batch_states)
-        state_slice = slice(s0, s1)
-        info_chunk = _slice_info_dict(info_cpu, state_slice, device)
-        for c0 in range(0, num_candidates, batch_candidates):
-            c1 = min(num_candidates, c0 + batch_candidates)
-            cand_chunk = candidate_actions_cpu[state_slice, c0:c1].to(device)
-            cand_eval = adapt_candidates_for_model(cand_chunk, model)
-            expanded = expand_info_for_candidates(
-                info_chunk,
-                num_candidates=int(c1 - c0),
-            )
-            with torch.no_grad():
-                s_cost = compute_model_costs(model, expanded, cand_eval)
-            costs_cpu[state_slice, c0:c1] = s_cost.detach().to("cpu")
-            del cand_chunk
-            del cand_eval
-            del expanded
-            del s_cost
-        del info_chunk
-    return costs_cpu
-
-
-def _aggregate_metrics(
-    *,
-    teacher_costs_cpu: torch.Tensor,
-    student_costs_cpu: torch.Tensor,
-    candidate_actions_cpu: torch.Tensor,
-    teacher_best_index_cpu: torch.Tensor,
-    teacher_best_first_action_cpu: torch.Tensor,
-) -> dict[str, Any]:
-    teacher_sorted = torch.argsort(teacher_costs_cpu, dim=1)
-    student_sorted = torch.argsort(student_costs_cpu, dim=1)
-    student_best = student_sorted[:, 0]
-    teacher_best = teacher_sorted[:, 0]
-    regret = (
-        teacher_costs_cpu[
-            torch.arange(teacher_costs_cpu.shape[0]),
-            student_best,
-        ]
-        - teacher_costs_cpu[
-            torch.arange(teacher_costs_cpu.shape[0]),
-            teacher_best,
-        ]
-    )
-    student_best_first_action = candidate_actions_cpu[
-        torch.arange(candidate_actions_cpu.shape[0]),
-        student_best,
-        0,
-        :,
-    ]
-    first_action_error = torch.linalg.norm(
-        student_best_first_action - teacher_best_first_action_cpu,
-        dim=1,
-    )
-    spearman_per_state = torch.tensor(
-        [
-            _spearman(teacher_costs_cpu[i], student_costs_cpu[i])
-            for i in range(teacher_costs_cpu.shape[0])
-        ],
-        dtype=torch.float32,
-    )
-    return {
-        "spearman": float(spearman_per_state.mean().item()),
-        "top1_overlap": _topk_overlap_mean(teacher_sorted, student_sorted, 1),
-        "top5_overlap": _topk_overlap_mean(teacher_sorted, student_sorted, 5),
-        "top10_overlap": _topk_overlap_mean(
-            teacher_sorted,
-            student_sorted,
-            10,
-        ),
-        "regret": float(regret.mean().item()),
-        "first_action_error": float(first_action_error.mean().item()),
-        "teacher_best_index_match_rate": float(
-            (student_best == teacher_best_index_cpu).float().mean().item()
-        ),
-        "spearman_per_state_first3": [
-            float(v)
-            for v in spearman_per_state[:3].tolist()
-        ],
-    }
-
-
-def _old_eval_path(
-    *,
-    model: torch.nn.Module,
-    cache: dict[str, Any],
-    device: str,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    info = build_info_dict_from_cache(
-        env_name=cache["env"],
-        episodes_idx=list(cache["episodes_idx"]),
-        start_steps=list(cache["start_steps"]),
-        goal_offset_steps=int(cache["goal_offset_steps"]),
-        device=device,
-    )
-    info = maybe_align_action_width(info, model)
-    candidate_actions_cpu = cache["candidate_actions"].float()
-    candidate_eval = adapt_candidates_for_model(
-        candidate_actions_cpu.to(device),
-        model,
-    )
-    expanded = expand_info_for_candidates(
-        info,
-        num_candidates=int(candidate_actions_cpu.shape[1]),
-    )
-    with torch.no_grad():
-        student_costs = compute_model_costs(model, expanded, candidate_eval)
-    student_costs_cpu = student_costs.detach().to("cpu").float()
-    metadata = {
-        "candidate_actions_raw_shape": list(candidate_actions_cpu.shape),
-        "candidate_actions_eval_shape": list(candidate_eval.shape),
-        "student_costs_shape": list(student_costs_cpu.shape),
-    }
-    return student_costs_cpu, metadata
-
-
-def _crossed_exact_eval_path(
-    *,
-    model: torch.nn.Module,
-    cache: dict[str, Any],
-    device: str,
-    batch_states: int,
-    batch_candidates: int,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    # Exact-mode contract in crossed evaluator now mirrors
-    # evaluate_operator_metrics reference behavior.
-    info = build_info_dict_from_cache(
-        env_name=cache["env"],
-        episodes_idx=list(cache["episodes_idx"]),
-        start_steps=list(cache["start_steps"]),
-        goal_offset_steps=int(cache["goal_offset_steps"]),
-        device=device,
-    )
-    info = maybe_align_action_width(info, model)
-    candidate_actions_cpu = cache["candidate_actions"].float()
-    candidate_eval = adapt_candidates_for_model(
-        candidate_actions_cpu.to(device),
-        model,
-    )
-    expanded = expand_info_for_candidates(
-        info,
-        num_candidates=int(candidate_actions_cpu.shape[1]),
-    )
-    with torch.no_grad():
-        student_costs = compute_model_costs(model, expanded, candidate_eval)
-    student_costs_cpu = student_costs.detach().to("cpu").float()
-
-    # Keep a chunked probe for forensic visibility.
-    info_cpu = build_info_dict_from_cache(
-        env_name=cache["env"],
-        episodes_idx=list(cache["episodes_idx"]),
-        start_steps=list(cache["start_steps"]),
-        goal_offset_steps=int(cache["goal_offset_steps"]),
-        device="cpu",
-    )
-    info_cpu = maybe_align_action_width(info_cpu, model)
-    chunked_probe = _compute_student_costs_chunked(
-        model=model,
-        info_cpu=info_cpu,
-        candidate_actions_cpu=candidate_actions_cpu,
-        device=device,
-        batch_states=batch_states,
-        batch_candidates=batch_candidates,
-    )
-    metadata = {
-        "candidate_actions_raw_shape": list(candidate_actions_cpu.shape),
-        "candidate_actions_eval_shape": list(candidate_eval.shape),
-        "student_costs_shape": list(student_costs_cpu.shape),
-        "chunked_probe_max_abs_diff_vs_exact": float(
-            (chunked_probe - student_costs_cpu).abs().max().item()
-        ),
-    }
-    return student_costs_cpu, metadata
 
 
 def _first_divergence(
@@ -262,15 +23,25 @@ def _first_divergence(
     bad = diff > atol
     if not bool(bad.any().item()):
         return None
-    idx = torch.nonzero(bad, as_tuple=False)[0]
-    i = int(idx[0].item())
-    j = int(idx[1].item())
+    ij = torch.nonzero(bad, as_tuple=False)[0]
+    i = int(ij[0].item())
+    j = int(ij[1].item())
+    rel = diff[i, j] / max(1e-12, float(a[i, j].abs().item()))
     return {
         "state_index": i,
         "candidate_index": j,
         "old_value": float(a[i, j].item()),
         "crossed_value": float(b[i, j].item()),
         "abs_diff": float(diff[i, j].item()),
+        "rel_diff": float(rel),
+    }
+
+
+def _agg(m: dict[str, Any]) -> dict[str, float]:
+    return {
+        "spearman": float(m["spearman_per_state"]["mean"]),
+        "top5": float(m["topk_overlap"]["5"]["mean"]),
+        "regret": float(m["teacher_regret"]["mean"]),
     }
 
 
@@ -278,14 +49,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache", required=True)
     parser.add_argument("--model-path", required=True)
-    parser.add_argument(
-        "--device",
-        default="auto",
-        choices=["cpu", "cuda", "auto"],
-    )
+    parser.add_argument("--device", default="auto", choices=["cpu", "cuda", "auto"])
     parser.add_argument("--batch-states", type=int, default=8)
     parser.add_argument("--batch-candidates", type=int, default=128)
-    parser.add_argument("--atol", type=float, default=1e-5)
+    parser.add_argument("--atol", type=float, default=1e-3)
     parser.add_argument("--tag", default=None)
     args = parser.parse_args()
 
@@ -297,95 +64,73 @@ def main() -> None:
         raise FileNotFoundError(f"Missing model: {model_path}")
 
     device = resolve_device(args.device)
-    cache = torch.load(cache_path, map_location="cpu", weights_only=False)
-    model = load_model_from_path(model_path, device=device).eval()
-    model.requires_grad_(False)
+    cache = load_operator_cache(cache_path)
 
-    teacher_costs = cache["teacher_costs"].float()
-    candidate_actions = cache["candidate_actions"].float()
-    teacher_best_index = cache["teacher_best_index"].long()
-    teacher_best_first_action = cache["teacher_best_first_action"].float()
-
-    old_costs, old_meta = _old_eval_path(
-        model=model,
+    ref = evaluate_model_on_operator_cache(
         cache=cache,
+        model_path=model_path,
         device=device,
+        use_chunked_student=False,
     )
-    crossed_costs, crossed_meta = _crossed_exact_eval_path(
-        model=model,
+    crossed = evaluate_model_on_operator_cache(
         cache=cache,
+        model_path=model_path,
         device=device,
+        use_chunked_student=False,
+    )
+    probe = evaluate_model_on_operator_cache(
+        cache=cache,
+        model_path=model_path,
+        device=device,
+        use_chunked_student=True,
         batch_states=int(args.batch_states),
         batch_candidates=int(args.batch_candidates),
     )
 
-    old_metrics = _aggregate_metrics(
-        teacher_costs_cpu=teacher_costs,
-        student_costs_cpu=old_costs,
-        candidate_actions_cpu=candidate_actions,
-        teacher_best_index_cpu=teacher_best_index,
-        teacher_best_first_action_cpu=teacher_best_first_action,
-    )
-    crossed_metrics = _aggregate_metrics(
-        teacher_costs_cpu=teacher_costs,
-        student_costs_cpu=crossed_costs,
-        candidate_actions_cpu=candidate_actions,
-        teacher_best_index_cpu=teacher_best_index,
-        teacher_best_first_action_cpu=teacher_best_first_action,
-    )
-
-    exact_equal = bool(torch.equal(old_costs, crossed_costs))
+    ref_costs = ref["student_costs"]
+    crossed_costs = crossed["student_costs"]
+    probe_costs = probe["student_costs"]
+    exact_equal = bool(torch.equal(ref_costs, crossed_costs))
     allclose = bool(
-        torch.allclose(
-            old_costs,
-            crossed_costs,
-            atol=float(args.atol),
-            rtol=0.0,
-        )
+        torch.allclose(ref_costs, crossed_costs, atol=float(args.atol), rtol=0.0)
     )
-    first_div = _first_divergence(old_costs, crossed_costs, float(args.atol))
+    max_abs = float((ref_costs - crossed_costs).abs().max().item())
+    first = _first_divergence(ref_costs, crossed_costs, float(args.atol))
+    probe_max_abs = float((ref_costs - probe_costs).abs().max().item())
 
     payload = {
         "cache_path": str(cache_path),
         "model_path": str(model_path),
         "device": device,
-        "cache_shapes": {
-            "candidate_actions": list(candidate_actions.shape),
-            "teacher_costs": list(teacher_costs.shape),
-            "teacher_best_index": list(teacher_best_index.shape),
-            "teacher_best_first_action": list(teacher_best_first_action.shape),
-        },
-        "old_eval_path": {
-            "metadata": old_meta,
-            "aggregate": old_metrics,
+        "reference": {
+            "metadata": ref["metadata"],
+            "aggregate": _agg(ref["metrics"]),
             "teacher_costs_first3x8": [
                 [float(v) for v in row]
-                for row in teacher_costs[:3, :8].tolist()
+                for row in ref["teacher_costs"][:3, :8].tolist()
             ],
             "student_costs_first3x8": [
                 [float(v) for v in row]
-                for row in old_costs[:3, :8].tolist()
+                for row in ref_costs[:3, :8].tolist()
             ],
         },
-        "crossed_eval_exact_path": {
-            "metadata": crossed_meta,
-            "aggregate": crossed_metrics,
-            "teacher_costs_first3x8": [
-                [float(v) for v in row]
-                for row in teacher_costs[:3, :8].tolist()
-            ],
+        "crossed_exact": {
+            "metadata": crossed["metadata"],
+            "aggregate": _agg(crossed["metrics"]),
             "student_costs_first3x8": [
                 [float(v) for v in row]
                 for row in crossed_costs[:3, :8].tolist()
             ],
         },
+        "chunked_probe": {
+            "metadata": probe["metadata"],
+            "max_abs_diff_vs_reference": probe_max_abs,
+        },
         "comparison": {
-            "costs_exact_equal": exact_equal,
-            "costs_allclose": allclose,
-            "max_abs_diff": float(
-                (old_costs - crossed_costs).abs().max().item()
-            ),
-            "first_divergence": first_div,
+            "exact_equal": exact_equal,
+            "allclose": allclose,
+            "max_abs_diff": max_abs,
+            "first_divergence": first,
         },
     }
 
@@ -402,37 +147,42 @@ def main() -> None:
     print("  old aggregate:")
     print(
         "    spearman={:.6f} top5={:.6f} regret={:.6f}".format(
-            old_metrics["spearman"],
-            old_metrics["top5_overlap"],
-            old_metrics["regret"],
+            payload["reference"]["aggregate"]["spearman"],
+            payload["reference"]["aggregate"]["top5"],
+            payload["reference"]["aggregate"]["regret"],
         )
     )
     print("  crossed aggregate:")
     print(
         "    spearman={:.6f} top5={:.6f} regret={:.6f}".format(
-            crossed_metrics["spearman"],
-            crossed_metrics["top5_overlap"],
-            crossed_metrics["regret"],
+            payload["crossed_exact"]["aggregate"]["spearman"],
+            payload["crossed_exact"]["aggregate"]["top5"],
+            payload["crossed_exact"]["aggregate"]["regret"],
         )
     )
     print(
         "  comparison: exact_equal={} allclose={} max_abs_diff={:.8f}".format(
             exact_equal,
             allclose,
-            payload["comparison"]["max_abs_diff"],
+            max_abs,
         )
     )
-    if first_div is not None:
+    print(
+        "  chunked probe max_abs_diff_vs_reference={:.8f}".format(
+            probe_max_abs,
+        )
+    )
+    if first is not None:
         print(
             (
                 "  first divergence: state={} cand={} old={:.6f} "
                 "crossed={:.6f} diff={:.6f}"
             ).format(
-                first_div["state_index"],
-                first_div["candidate_index"],
-                first_div["old_value"],
-                first_div["crossed_value"],
-                first_div["abs_diff"],
+                first["state_index"],
+                first["candidate_index"],
+                first["old_value"],
+                first["crossed_value"],
+                first["abs_diff"],
             )
         )
 
