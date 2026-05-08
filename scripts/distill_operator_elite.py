@@ -60,11 +60,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--val-states", type=int, default=64)
+    parser.add_argument("--val-candidates", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--device",
         default="auto",
         choices=["cpu", "cuda", "auto"],
+    )
+    parser.add_argument(
+        "--save-best-by",
+        default="val_top5",
+        choices=["val_spearman", "val_top5", "val_regret", "val_loss"],
     )
     parser.add_argument("--limit-states", type=int, default=None)
     parser.add_argument("--limit-candidates", type=int, default=None)
@@ -201,6 +208,31 @@ def _resolve_cache_paths(args: argparse.Namespace) -> tuple[Path, Path]:
     return train_cache, eval_cache
 
 
+def _is_better_checkpoint(
+    *,
+    save_best_by: str,
+    candidate_metrics: dict,
+    candidate_loss: float,
+    best_metrics: dict | None,
+    best_loss: float | None,
+) -> bool:
+    if best_metrics is None or best_loss is None:
+        return True
+    if save_best_by == "val_spearman":
+        return float(candidate_metrics["spearman_mean"]) > float(
+            best_metrics["spearman_mean"]
+        )
+    if save_best_by == "val_top5":
+        return float(candidate_metrics["top5_overlap_mean"]) > float(
+            best_metrics["top5_overlap_mean"]
+        )
+    if save_best_by == "val_regret":
+        return float(candidate_metrics["teacher_regret_mean"]) < float(
+            best_metrics["teacher_regret_mean"]
+        )
+    return float(candidate_loss) < float(best_loss)
+
+
 def _elite_loss(
     teacher_costs: torch.Tensor,
     student_costs: torch.Tensor,
@@ -213,10 +245,11 @@ def _elite_loss(
 ) -> torch.Tensor:
     c_s = _normalize_costs(student_costs, normalize_costs, eps)
     logits = -c_s / tau
+    k_eff = max(1, min(int(elite_k), int(teacher_costs.shape[1] - 1)))
 
     topk_idx = torch.topk(
         teacher_costs,
-        k=elite_k,
+        k=k_eff,
         dim=-1,
         largest=False,
     ).indices
@@ -225,7 +258,7 @@ def _elite_loss(
 
     if loss_mode == "bce":
         n = logits.shape[1]
-        pos_weight_val = float((n - elite_k) / max(1, elite_k))
+        pos_weight_val = float((n - k_eff) / max(1, k_eff))
         pos_weight = torch.tensor(
             pos_weight_val,
             dtype=logits.dtype,
@@ -354,7 +387,8 @@ def main() -> None:
     )
     eval_teacher_costs = eval_teacher_costs.to(device)
 
-    val_idx_np = np.arange(min(4, eval_n_states), dtype=np.int64)
+    val_count = max(1, min(int(args.val_states), eval_n_states))
+    val_idx_np = np.arange(val_count, dtype=np.int64)
     if len(val_idx_np) == 0:
         raise ValueError("No states available in eval cache.")
     train_idx_np = np.arange(train_n_states, dtype=np.int64)
@@ -381,6 +415,8 @@ def main() -> None:
     best_step = None
     best_top10 = -1.0
     best_regret = float("inf")
+    best_validation_loss = float("inf")
+    best_validation_metrics = None
     run_success = False
     final_operator_validation = None
 
@@ -476,9 +512,13 @@ def main() -> None:
                     info_val = _slice_info_dict(eval_info_all, val_idx)
                     cand_val = eval_cand_eval_all[val_idx]
                     t_cost_val = eval_teacher_costs[val_idx]
+                    if args.val_candidates is not None:
+                        vc = int(min(args.val_candidates, eval_n_candidates))
+                        cand_val = cand_val[:, :vc]
+                        t_cost_val = t_cost_val[:, :vc]
                     exp_val = expand_info_for_candidates(
                         info_val,
-                        num_candidates=eval_n_candidates,
+                        num_candidates=int(cand_val.shape[1]),
                     )
                     s_cost_val = compute_model_costs(student, exp_val, cand_val)
                     val_loss_t = _elite_loss(
@@ -514,17 +554,19 @@ def main() -> None:
                     + "\n"
                 )
 
-                if val_ok:
-                    top10 = float(val_metrics["top10_overlap_mean"])
-                    regret = float(val_metrics["teacher_regret_mean"])
-                    better = (top10 > best_top10) or (
-                        np.isclose(top10, best_top10) and regret < best_regret
-                    )
-                    if better:
-                        best_top10 = top10
-                        best_regret = regret
-                        best_step = int(step)
-                        best_state = snapshot()
+                if val_ok and _is_better_checkpoint(
+                    save_best_by=args.save_best_by,
+                    candidate_metrics=val_metrics,
+                    candidate_loss=val_loss,
+                    best_metrics=best_validation_metrics,
+                    best_loss=best_validation_loss,
+                ):
+                    best_top10 = float(val_metrics["top10_overlap_mean"])
+                    best_regret = float(val_metrics["teacher_regret_mean"])
+                    best_validation_loss = val_loss
+                    best_validation_metrics = val_metrics
+                    best_step = int(step)
+                    best_state = snapshot()
 
     if best_state is not None:
         restore(best_state)
@@ -534,9 +576,13 @@ def main() -> None:
         info_val = _slice_info_dict(eval_info_all, val_idx)
         cand_val = eval_cand_eval_all[val_idx]
         t_cost_val = eval_teacher_costs[val_idx]
+        if args.val_candidates is not None:
+            vc = int(min(args.val_candidates, eval_n_candidates))
+            cand_val = cand_val[:, :vc]
+            t_cost_val = t_cost_val[:, :vc]
         exp_val = expand_info_for_candidates(
             info_val,
-            num_candidates=eval_n_candidates,
+            num_candidates=int(cand_val.shape[1]),
         )
         s_cost_val = compute_model_costs(student, exp_val, cand_val)
         final_val_loss_t = _elite_loss(
@@ -591,6 +637,11 @@ def main() -> None:
         "trainable_substring": args.trainable_substring,
         "max_steps": int(args.max_steps),
         "batch_size": int(args.batch_size),
+        "val_states": int(val_count),
+        "val_candidates": (
+            int(args.val_candidates) if args.val_candidates is not None else None
+        ),
+        "save_best_by": args.save_best_by,
         "lr": float(args.lr),
         "weight_decay": float(args.weight_decay),
         "grad_clip": float(args.grad_clip),

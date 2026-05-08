@@ -52,13 +52,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--val-states", type=int, default=64)
+    parser.add_argument("--val-candidates", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--device",
         default="auto",
         choices=["cpu", "cuda", "auto"],
     )
-    parser.add_argument("--save-best-by", default="operator_kl")
+    parser.add_argument(
+        "--save-best-by",
+        default="val_loss",
+        choices=["val_spearman", "val_top5", "val_regret", "val_loss"],
+    )
     parser.add_argument("--restore-best-on-failure", action="store_true")
     parser.add_argument(
         "--no-restore-best-on-failure",
@@ -233,6 +239,31 @@ def _resolve_cache_paths(args: argparse.Namespace) -> tuple[Path, Path]:
     return train_cache, eval_cache
 
 
+def _is_better_checkpoint(
+    *,
+    save_best_by: str,
+    candidate_metrics: dict,
+    candidate_loss: float,
+    best_metrics: dict | None,
+    best_loss: float | None,
+) -> bool:
+    if best_metrics is None or best_loss is None:
+        return True
+    if save_best_by == "val_spearman":
+        return float(candidate_metrics["spearman_mean"]) > float(
+            best_metrics["spearman_mean"]
+        )
+    if save_best_by == "val_top5":
+        return float(candidate_metrics["top5_overlap_mean"]) > float(
+            best_metrics["top5_overlap_mean"]
+        )
+    if save_best_by == "val_regret":
+        return float(candidate_metrics["teacher_regret_mean"]) < float(
+            best_metrics["teacher_regret_mean"]
+        )
+    return float(candidate_loss) < float(best_loss)
+
+
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
@@ -332,7 +363,8 @@ def main() -> None:
     )
     eval_teacher_costs = eval_teacher_costs.to(device)
 
-    val_idx_np = np.arange(min(4, eval_n_states), dtype=np.int64)
+    val_count = max(1, min(int(args.val_states), eval_n_states))
+    val_idx_np = np.arange(val_count, dtype=np.int64)
     if len(val_idx_np) == 0:
         raise ValueError("No states available in eval cache.")
     train_idx_np = np.arange(train_n_states, dtype=np.int64)
@@ -360,6 +392,7 @@ def main() -> None:
     best_state = None
     best_step = None
     best_validation_kl = float("inf")
+    best_validation_metrics = None
     run_success = False
     final_operator_validation = None
 
@@ -470,9 +503,13 @@ def main() -> None:
                     info_val = _slice_info_dict(eval_info_all, val_idx)
                     cand_val = eval_cand_eval_all[val_idx]
                     t_cost_val = eval_teacher_costs[val_idx]
+                    if args.val_candidates is not None:
+                        vc = int(min(args.val_candidates, eval_n_candidates))
+                        cand_val = cand_val[:, :vc]
+                        t_cost_val = t_cost_val[:, :vc]
                     exp_val = expand_info_for_candidates(
                         info_val,
-                        num_candidates=eval_n_candidates,
+                        num_candidates=int(cand_val.shape[1]),
                     )
                     s_cost_val = compute_model_costs(
                         student,
@@ -505,8 +542,15 @@ def main() -> None:
                     "validation_passed": val_ok,
                 }
                 log_f.write(json.dumps(rec_eval) + "\n")
-                if val_ok and val_kl < best_validation_kl:
+                if val_ok and _is_better_checkpoint(
+                    save_best_by=args.save_best_by,
+                    candidate_metrics=val_metrics,
+                    candidate_loss=val_kl,
+                    best_metrics=best_validation_metrics,
+                    best_loss=best_validation_kl,
+                ):
                     best_validation_kl = val_kl
+                    best_validation_metrics = val_metrics
                     best_step = int(step)
                     best_state = snapshot()
 
@@ -518,9 +562,13 @@ def main() -> None:
         info_val = _slice_info_dict(eval_info_all, val_idx)
         cand_val = eval_cand_eval_all[val_idx]
         t_cost_val = eval_teacher_costs[val_idx]
+        if args.val_candidates is not None:
+            vc = int(min(args.val_candidates, eval_n_candidates))
+            cand_val = cand_val[:, :vc]
+            t_cost_val = t_cost_val[:, :vc]
         exp_val = expand_info_for_candidates(
             info_val,
-            num_candidates=eval_n_candidates,
+            num_candidates=int(cand_val.shape[1]),
         )
         s_cost_val = compute_model_costs(student, exp_val, cand_val)
         val_kl_t, _, _ = _kl_from_costs(
@@ -570,6 +618,11 @@ def main() -> None:
         "trainable_substring": args.trainable_substring,
         "max_steps": int(args.max_steps),
         "batch_size": int(args.batch_size),
+        "val_states": int(val_count),
+        "val_candidates": (
+            int(args.val_candidates) if args.val_candidates is not None else None
+        ),
+        "save_best_by": args.save_best_by,
         "lr": float(args.lr),
         "weight_decay": float(args.weight_decay),
         "grad_clip": float(args.grad_clip),
