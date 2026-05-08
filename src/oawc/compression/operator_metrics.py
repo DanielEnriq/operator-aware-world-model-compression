@@ -185,11 +185,9 @@ def _compute_cost_with_jepa_fallback(
     info_dict: dict[str, torch.Tensor],
     action_candidates: torch.Tensor,
 ) -> torch.Tensor:
-    copied = {}
-    for key, value in info_dict.items():
-        copied[key] = value.clone() if torch.is_tensor(value) else value
-
-    goal = {k: v[:, 0] for k, v in copied.items() if torch.is_tensor(v)}
+    # Operate directly on caller-provided chunked tensors to avoid cloning
+    # large expanded inputs (e.g. pixels) during fallback.
+    goal = {k: v[:, 0] for k, v in info_dict.items() if torch.is_tensor(v)}
     goal["pixels"] = goal["goal"]
     for key in list(goal.keys()):
         if key.startswith("goal_"):
@@ -198,9 +196,10 @@ def _compute_cost_with_jepa_fallback(
     goal = model.encode(goal)
     goal_emb = goal["emb"]
 
-    copied["goal_emb"] = goal_emb
-    copied = model.rollout(copied, action_candidates)
-    pred_emb = copied["predicted_emb"]
+    rollout_input = dict(info_dict)
+    rollout_input["goal_emb"] = goal_emb
+    rollout_output = model.rollout(rollout_input, action_candidates)
+    pred_emb = rollout_output["predicted_emb"]
 
     while goal_emb.ndim < pred_emb.ndim:
         goal_emb = goal_emb.unsqueeze(1)

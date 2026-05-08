@@ -33,6 +33,10 @@ from oawc.envs import ENV_SPECS
 from oawc.models import load_cost_model
 
 
+def _str2bool(v: str) -> bool:
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _get_child(parent: nn.Module, child_name: str) -> nn.Module:
     return getattr(parent, child_name)
 
@@ -76,6 +80,34 @@ def _sample_candidates(
     return actions.to(device)
 
 
+def _slice_info_dict(
+    info_dict: dict[str, torch.Tensor],
+    state_slice: slice,
+    device: str,
+) -> dict[str, torch.Tensor]:
+    sliced: dict[str, torch.Tensor] = {}
+    for key, value in info_dict.items():
+        sliced[key] = value[state_slice].to(device)
+    return sliced
+
+
+def _oom_retry_batch_sizes(
+    state_bs: int,
+    cand_bs: int,
+) -> tuple[int, int] | None:
+    if state_bs > 1:
+        return max(1, state_bs // 2), cand_bs
+    if cand_bs > 1:
+        return state_bs, max(1, cand_bs // 2)
+    return None
+
+
+def _cuda_peak_gib(device: str) -> float | None:
+    if device != "cuda" or not torch.cuda.is_available():
+        return None
+    return float(torch.cuda.max_memory_allocated() / (1024**3))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", required=True)
@@ -89,6 +121,13 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=5)
     parser.add_argument("--max-rows-per-layer", type=int, default=8192)
     parser.add_argument("--ridge", type=float, default=1e-4)
+    parser.add_argument("--calib-batch-states", type=int, default=8)
+    parser.add_argument("--calib-batch-candidates", type=int, default=128)
+    parser.add_argument(
+        "--empty-cache-between-calib-batches",
+        type=_str2bool,
+        default=True,
+    )
     parser.add_argument("--calib-source", default="random_candidates")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -176,32 +215,119 @@ def main() -> None:
         num_eval=args.num_calib_states,
         seed=args.seed,
     )
-    info_dict = build_info_dict_from_cache(
+    info_dict_cpu = build_info_dict_from_cache(
         env_name=args.env,
         episodes_idx=list(tasks["episodes_idx"]),
         start_steps=list(tasks["start_steps"]),
         goal_offset_steps=int(tasks["goal_offset_steps"]),
-        device=device,
+        device="cpu",
     )
-    info_dict = maybe_align_action_width(info_dict, model)
+    info_dict_cpu = maybe_align_action_width(info_dict_cpu, model)
     action_dim = int(
-        ENV_SPECS[args.env].action_dim or info_dict["action"].shape[-1]
+        ENV_SPECS[args.env].action_dim or info_dict_cpu["action"].shape[-1]
     )
-    candidate_actions = _sample_candidates(
+    candidate_actions_cpu = _sample_candidates(
         num_states=args.num_calib_states,
         num_candidates=args.num_calib_candidates,
         horizon=args.horizon,
         action_dim=action_dim,
         seed=args.seed,
-        device=device,
+        device="cpu",
     )
-    candidate_actions_eval = adapt_candidates_for_model(candidate_actions, model)
-    expanded_info = expand_info_for_candidates(
-        info_dict,
-        num_candidates=args.num_calib_candidates,
-    )
+    num_states = int(candidate_actions_cpu.shape[0])
+    num_candidates = int(candidate_actions_cpu.shape[1])
+    state_bs = max(1, int(args.calib_batch_states))
+    cand_bs = max(1, int(args.calib_batch_candidates))
+    chunk_count = 0
+    state_start = 0
+
     with torch.no_grad():
-        _ = compute_model_costs(model, expanded_info, candidate_actions_eval)
+        while state_start < num_states:
+            curr_state_bs = min(state_bs, num_states - state_start)
+            state_slice = slice(state_start, state_start + curr_state_bs)
+            try:
+                cand_start = 0
+                while cand_start < num_candidates:
+                    curr_cand_bs = min(cand_bs, num_candidates - cand_start)
+                    cand_slice = slice(cand_start, cand_start + curr_cand_bs)
+
+                    if device == "cuda" and torch.cuda.is_available():
+                        torch.cuda.reset_peak_memory_stats()
+
+                    info_chunk = _slice_info_dict(info_dict_cpu, state_slice, device)
+                    candidate_chunk = candidate_actions_cpu[state_slice, cand_slice].to(
+                        device
+                    )
+                    candidate_eval = adapt_candidates_for_model(
+                        candidate_chunk,
+                        model,
+                    )
+                    expanded_chunk = expand_info_for_candidates(
+                        info_chunk,
+                        num_candidates=curr_cand_bs,
+                    )
+                    _ = compute_model_costs(
+                        model,
+                        expanded_chunk,
+                        candidate_eval,
+                    )
+
+                    chunk_count += 1
+                    info_shapes = {k: list(v.shape) for k, v in info_chunk.items()}
+                    total_rows = int(
+                        sum(
+                            rows.shape[0]
+                            for rows in activation_rows.values()
+                            if rows is not None
+                        )
+                    )
+                    print(
+                        "[calib-chunk] "
+                        f"states={state_slice.start}:{state_slice.stop} "
+                        f"cands={cand_slice.start}:{cand_slice.stop} "
+                        f"candidate_shape={list(candidate_eval.shape)} "
+                        f"cuda_peak_gib={_cuda_peak_gib(device)} "
+                        f"chunks_done={chunk_count} "
+                        f"layers_with_rows={len(activation_rows)} "
+                        f"total_rows={total_rows}"
+                    )
+                    print(f"[calib-chunk] info_shapes={info_shapes}")
+
+                    del info_chunk
+                    del candidate_chunk
+                    del candidate_eval
+                    del expanded_chunk
+                    if (
+                        args.empty_cache_between_calib_batches
+                        and device == "cuda"
+                        and torch.cuda.is_available()
+                    ):
+                        torch.cuda.empty_cache()
+                    cand_start += curr_cand_bs
+                state_start += curr_state_bs
+            except RuntimeError as exc:
+                msg = str(exc).lower()
+                is_oom = (
+                    "out of memory" in msg
+                    or "cuda out of memory" in msg
+                    or "torch.outofmemoryerror" in msg
+                )
+                if not is_oom:
+                    raise
+                if device == "cuda" and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                next_sizes = _oom_retry_batch_sizes(state_bs, cand_bs)
+                if next_sizes is None:
+                    raise RuntimeError(
+                        "Calibration OOM persisted at calib_batch_states=1 and "
+                        "calib_batch_candidates=1. Cannot proceed."
+                    ) from exc
+                state_bs, cand_bs = next_sizes
+                print(
+                    "[calib-oom-retry] lowering chunk sizes and retrying: "
+                    f"calib_batch_states={state_bs}, "
+                    f"calib_batch_candidates={cand_bs}"
+                )
 
     for h in hooks:
         h.remove()
@@ -344,6 +470,11 @@ def main() -> None:
         "horizon": int(args.horizon),
         "max_rows_per_layer": int(args.max_rows_per_layer),
         "ridge": float(args.ridge),
+        "calib_batch_states": int(args.calib_batch_states),
+        "calib_batch_candidates": int(args.calib_batch_candidates),
+        "empty_cache_between_calib_batches": bool(
+            args.empty_cache_between_calib_batches
+        ),
         "calib_source": args.calib_source,
         "device": device,
         "num_layers_considered": int(len(layer_names)),

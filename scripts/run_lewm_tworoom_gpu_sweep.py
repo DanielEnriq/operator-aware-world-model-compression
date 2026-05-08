@@ -40,6 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--cost-batch-states", type=int, default=8)
     parser.add_argument("--cost-batch-candidates", type=int, default=128)
+    parser.add_argument("--calib-batch-states", type=int, default=8)
+    parser.add_argument("--calib-batch-candidates", type=int, default=128)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--only", default=None)
@@ -413,6 +415,10 @@ def main() -> None:
                     "16384",
                     "--ridge",
                     "1e-4",
+                    "--calib-batch-states",
+                    str(args.calib_batch_states),
+                    "--calib-batch-candidates",
+                    str(args.calib_batch_candidates),
                     "--device",
                     args.device,
                     "--tag",
@@ -452,6 +458,10 @@ def main() -> None:
                     "16384",
                     "--ridge",
                     "1e-4",
+                    "--calib-batch-states",
+                    str(args.calib_batch_states),
+                    "--calib-batch-candidates",
+                    str(args.calib_batch_candidates),
                     "--device",
                     args.device,
                     "--tag",

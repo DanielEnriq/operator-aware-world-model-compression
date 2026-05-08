@@ -103,6 +103,8 @@ uv run python scripts/run_lewm_tworoom_gpu_sweep.py \
   --distill-batch-size 8 \
   --cost-batch-states 8 \
   --cost-batch-candidates 128 \
+  --calib-batch-states 8 \
+  --calib-batch-candidates 128 \
   --lr 1e-5 \
   --dry-run
 ```
@@ -131,6 +133,8 @@ uv run python scripts/run_lewm_tworoom_gpu_sweep.py \
   --distill-batch-size 8 \
   --cost-batch-states 8 \
   --cost-batch-candidates 128 \
+  --calib-batch-states 8 \
+  --calib-batch-candidates 128 \
   --lr 1e-5 \
   --skip-existing
 ```
