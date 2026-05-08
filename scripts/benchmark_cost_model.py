@@ -94,6 +94,45 @@ def _model_report_metadata(model_path: str | None) -> dict[str, Any] | None:
     }
 
 
+def _mean_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def _extract_metric(
+    raw_metrics: dict[str, Any],
+    keys: list[str],
+) -> float | None:
+    for key in keys:
+        if key not in raw_metrics:
+            continue
+        value = raw_metrics[key]
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, dict):
+            for field in ("mean", "avg", "value"):
+                field_value = value.get(field)
+                if isinstance(field_value, (int, float)):
+                    return float(field_value)
+            numeric_values = [
+                float(v)
+                for v in value.values()
+                if isinstance(v, (int, float))
+            ]
+            maybe_mean = _mean_or_none(numeric_values)
+            if maybe_mean is not None:
+                return maybe_mean
+        if isinstance(value, list):
+            numeric_values = [
+                float(v) for v in value if isinstance(v, (int, float))
+            ]
+            maybe_mean = _mean_or_none(numeric_values)
+            if maybe_mean is not None:
+                return maybe_mean
+    return None
+
+
 def imagenet_transform(img_size: int = 224):
     """
     Same image preprocessing pattern used in external/le-wm/eval.py:
@@ -256,9 +295,41 @@ def _configure_cost_interface(
         )
         return model, "fallback"
 
+    available = [
+        name
+        for name in [
+            "get_cost",
+            "cost",
+            "forward",
+            "encode",
+            "rollout",
+            "predict",
+            "step",
+        ]
+        if callable(getattr(model, name, None))
+    ]
+    if callable(getattr(model, "get_cost", None)) or callable(
+        getattr(model, "cost", None)
+    ):
+        mode = "cost_model_direct"
+    elif callable(getattr(model, "forward", None)) and not (
+        callable(getattr(model, "encode", None))
+        and callable(getattr(model, "rollout", None))
+    ):
+        mode = "forward_only"
+    elif callable(getattr(model, "encode", None)) and callable(
+        getattr(model, "rollout", None)
+    ):
+        mode = "representation_rollout_only"
+    else:
+        mode = "no_planning_interface"
+
     raise TypeError(
-        "Loaded model has no usable cost interface for closed-loop planning. "
-        "Expected one of: get_cost, cost, forward, or (encode+rollout fallback)."
+        "Loaded model does not expose a planning cost interface. "
+        "Expected one of: get_cost, cost, forward, or "
+        "encode+rollout fallback. "
+        f"Available callables: {available or ['<none>']}. "
+        f"Inferred interface_mode={mode}."
     )
 
 
@@ -453,7 +524,33 @@ def run_cost_model_benchmark(
         "performance": {
             "success_rate": metrics.get("success_rate"),
             "episode_successes": metrics.get("episode_successes"),
+            "num_successes": (
+                int(sum(int(bool(x)) for x in metrics.get("episode_successes", [])))
+                if isinstance(metrics.get("episode_successes"), list)
+                else None
+            ),
             "raw_metrics": metrics,
+            "avg_return": _extract_metric(
+                metrics,
+                [
+                    "avg_return",
+                    "return",
+                    "returns",
+                    "episode_return",
+                    "episode_returns",
+                    "mean_return",
+                ],
+            ),
+            "avg_final_distance": _extract_metric(
+                metrics,
+                [
+                    "avg_final_distance",
+                    "final_distance",
+                    "distance_to_goal",
+                    "goal_distance",
+                    "episode_final_distance",
+                ],
+            ),
         },
         "efficiency": {
             "evaluation_time_sec": evaluation_time_sec,
@@ -466,10 +563,37 @@ def run_cost_model_benchmark(
         },
         "paper_metrics": {
             "control_success_rate": metrics.get("success_rate"),
+            "num_successes": (
+                int(sum(int(bool(x)) for x in metrics.get("episode_successes", [])))
+                if isinstance(metrics.get("episode_successes"), list)
+                else None
+            ),
+            "avg_return": _extract_metric(
+                metrics,
+                [
+                    "avg_return",
+                    "return",
+                    "returns",
+                    "episode_return",
+                    "episode_returns",
+                    "mean_return",
+                ],
+            ),
+            "avg_final_distance": _extract_metric(
+                metrics,
+                [
+                    "avg_final_distance",
+                    "final_distance",
+                    "distance_to_goal",
+                    "goal_distance",
+                    "episode_final_distance",
+                ],
+            ),
             "planning_time_sec": evaluation_time_sec,
             "model_parameters": count_parameters(model),
             "model_size_bytes": model_size_bytes(model),
             "compression_ratio": None,
+            "interface_call_path": cost_interface,
         },
         "notes": (
             "Dataset-driven SWM evaluation using the same start/goal sampling logic "

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,7 +12,6 @@ from oawc.compression import (
     count_parameters,
     factorize_linear_svd,
     model_size_bytes,
-    params_matching_substring,
     relative_fro_error,
     save_json,
 )
@@ -38,6 +38,49 @@ def _set_child(parent: nn.Module, child_name: str, child: nn.Module) -> None:
     setattr(parent, child_name, child)
 
 
+def _parse_target_substrings(
+    target_substrings: str | None,
+    target_substring_legacy: str | None,
+) -> list[str]:
+    raw = target_substrings if target_substrings is not None else target_substring_legacy
+    if raw is None:
+        return ["predictor"]
+    values = [v.strip() for v in str(raw).split(",") if v.strip()]
+    return values or ["predictor"]
+
+
+def _name_matches_any(name: str, substrings: list[str]) -> bool:
+    return any(sub in name for sub in substrings)
+
+
+def _params_matching_any_substring(
+    model: nn.Module,
+    substrings: list[str],
+) -> int:
+    total = 0
+    for name, param in model.named_parameters():
+        if _name_matches_any(name, substrings):
+            total += int(param.numel())
+    return total
+
+
+def _infer_interface_mode(model: nn.Module) -> str:
+    if callable(getattr(model, "get_cost", None)) or callable(
+        getattr(model, "cost", None)
+    ):
+        return "cost_model_direct"
+    if callable(getattr(model, "forward", None)) and not (
+        callable(getattr(model, "encode", None))
+        and callable(getattr(model, "rollout", None))
+    ):
+        return "forward_only"
+    if callable(getattr(model, "encode", None)) and callable(
+        getattr(model, "rollout", None)
+    ):
+        return "representation_rollout_only"
+    return "no_planning_interface"
+
+
 def replace_linear_by_path(
     model: nn.Module,
     full_name: str,
@@ -57,6 +100,11 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--rank-fraction", type=float, required=True)
     parser.add_argument("--target-substring", default="predictor")
+    parser.add_argument(
+        "--target-substrings",
+        default=None,
+        help="Comma-separated module substrings to compress.",
+    )
     parser.add_argument("--min-dim", type=int, default=64)
     parser.add_argument(
         "--device",
@@ -72,7 +120,12 @@ def main() -> None:
             "--rank-fraction must be in (0,1) for compressive SVD."
         )
 
+    run_start = time.time()
     device = resolve_device(args.device)
+    target_substrings = _parse_target_substrings(
+        args.target_substrings,
+        args.target_substring,
+    )
     out_dir = Path(args.output_root) / args.env / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,14 +140,14 @@ def main() -> None:
     model.requires_grad_(False)
 
     total_before = count_parameters(model)
-    predictor_before = params_matching_substring(model, args.target_substring)
+    predictor_before = _params_matching_any_substring(model, target_substrings)
     size_before = model_size_bytes(model)
 
     linear_entries = [
         (name, module)
         for name, module in model.named_modules()
         if isinstance(module, nn.Linear)
-        and args.target_substring in name
+        and _name_matches_any(name, target_substrings)
     ]
 
     module_report: list[dict] = []
@@ -199,7 +252,7 @@ def main() -> None:
 
     skipped_count = int(len(linear_entries) - compressed_count)
     total_after = count_parameters(model)
-    predictor_after = params_matching_substring(model, args.target_substring)
+    predictor_after = _params_matching_any_substring(model, target_substrings)
     size_after = model_size_bytes(model)
 
     compressed_model_path = out_dir / "compressed_model.pt"
@@ -213,6 +266,7 @@ def main() -> None:
         "checkpoint": args.checkpoint,
         "tag": args.tag,
         "target_substring": args.target_substring,
+        "target_substrings": target_substrings,
         "min_dim": int(args.min_dim),
         "rank_fraction": float(args.rank_fraction),
         "device": device,
@@ -235,6 +289,22 @@ def main() -> None:
         "model_size_bytes_before": int(size_before),
         "model_size_bytes_after": int(size_after),
         "has_get_cost_after_compression": bool(hasattr(model, "get_cost")),
+        "interface_mode_after_compression": _infer_interface_mode(model),
+        "selected_modules": [
+            entry["name"]
+            for entry in module_report
+            if entry.get("status") == "compressed"
+        ],
+        "skipped_modules": [
+            {
+                "name": entry["name"],
+                "reason_skipped": entry.get("skip_reason"),
+            }
+            for entry in module_report
+            if entry.get("status") == "skipped"
+        ],
+        "layers_compressed": int(compressed_count),
+        "wall_time_s": float(time.time() - run_start),
         "compressed_model_path": str(compressed_model_path),
     }
     save_json(out_dir / "compression_report.json", compression_report)
@@ -251,6 +321,8 @@ def main() -> None:
     print(
         "  predictor compression ratio:"
         f"{compression_report['predictor_compression_ratio']:.4f}"
+        if compression_report["predictor_compression_ratio"] is not None
+        else "  predictor compression ratio: n/a"
     )
     print(f"  compressed model:           {compressed_model_path}")
     print(

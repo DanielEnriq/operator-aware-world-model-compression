@@ -37,9 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-cache", default=None)
     parser.add_argument("--eval-cache", default=None)
     parser.add_argument("--student-path", required=True)
-    parser.add_argument("--max-steps", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--batch-states", type=int, default=16)
+    parser.add_argument("--batch-candidates", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument(
         "--normalize-costs",
@@ -48,12 +50,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--eps", type=float, default=1e-6)
     parser.add_argument("--trainable-substring", default="predictor")
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--eval-every", type=int, default=10)
-    parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--eval-every", type=int, default=100)
+    parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--val-states", type=int, default=64)
-    parser.add_argument("--val-candidates", type=int, default=None)
+    parser.add_argument("--val-candidates", type=int, default=128)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--device",
@@ -285,6 +287,12 @@ def main() -> None:
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     run_start = time.time()
+    batch_states = (
+        int(args.batch_size)
+        if args.batch_size is not None
+        else int(args.batch_states)
+    )
+    batch_candidates = int(args.batch_candidates)
 
     out_dir = Path(args.output_root) / args.env / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -411,25 +419,37 @@ def main() -> None:
     best_validation_metrics = None
     run_success = False
     final_operator_validation = None
+    consumed_candidates = 0
 
     with log_path.open("w", encoding="utf-8") as log_f:
         for step in range(1, int(args.max_steps) + 1):
             batch_idx_np = rng.choice(
                 train_idx_np,
-                size=min(args.batch_size, len(train_idx_np)),
+                size=min(batch_states, len(train_idx_np)),
                 replace=True,
+            )
+            cand_idx_np = rng.choice(
+                np.arange(train_n_candidates, dtype=np.int64),
+                size=min(batch_candidates, train_n_candidates),
+                replace=False,
             )
             batch_idx = torch.as_tensor(
                 batch_idx_np,
                 dtype=torch.long,
                 device=device,
             )
+            cand_idx = torch.as_tensor(
+                cand_idx_np,
+                dtype=torch.long,
+                device=device,
+            )
             info_batch = _slice_info_dict(train_info_all, batch_idx)
-            cand_batch = train_cand_eval_all[batch_idx]
-            t_cost_batch = train_teacher_costs[batch_idx]
+            cand_batch = train_cand_eval_all[batch_idx][:, cand_idx]
+            t_cost_batch = train_teacher_costs[batch_idx][:, cand_idx]
+            curr_num_candidates = int(cand_batch.shape[1])
             expanded = expand_info_for_candidates(
                 info_batch,
-                num_candidates=train_n_candidates,
+                num_candidates=curr_num_candidates,
             )
 
             step_start = time.time()
@@ -501,8 +521,11 @@ def main() -> None:
                 "candidate_actions_shape": list(cand_batch.shape),
                 "student_costs_shape": list(student_costs.shape),
                 "student_costs_requires_grad": requires_grad,
+                "batch_states": int(batch_idx.shape[0]),
+                "batch_candidates": curr_num_candidates,
             }
             log_f.write(json.dumps(rec) + "\n")
+            consumed_candidates += int(batch_idx.shape[0]) * curr_num_candidates
             if step % max(1, args.log_every) == 0 or step == 1:
                 print(
                     f"[train] step={step} kl={train_kl:.6f} "
@@ -614,6 +637,9 @@ def main() -> None:
     student_cpu = student.to("cpu").eval()
     student_cpu.requires_grad_(False)
     distilled_path = out_dir / "distilled_model.pt"
+    best_model_path = out_dir / "best_distilled_model.pt"
+    if best_state is not None:
+        torch.save(student_cpu, best_model_path)
     if run_success:
         torch.save(student_cpu, distilled_path)
 
@@ -634,7 +660,9 @@ def main() -> None:
         "trainable_substring": args.trainable_substring,
         "max_steps": int(args.max_steps),
         "distill_steps": int(args.max_steps),
-        "batch_size": int(args.batch_size),
+        "batch_size": int(batch_states),
+        "distill_batch_states": int(batch_states),
+        "distill_batch_candidates": int(batch_candidates),
         "train_states": int(train_n_states),
         "train_candidates": int(train_n_candidates),
         "val_states": int(val_count),
@@ -659,6 +687,28 @@ def main() -> None:
             and final_train_kl < initial_train_kl
         ),
         "best_step": best_step,
+        "best_validation_metric_name": args.save_best_by,
+        "best_validation_metric_value": (
+            (
+                float(best_validation_metrics["spearman_mean"])
+                if args.save_best_by == "val_spearman"
+                else (
+                    float(best_validation_metrics["top5_overlap_mean"])
+                    if args.save_best_by == "val_top5"
+                    else (
+                        float(best_validation_metrics["teacher_regret_mean"])
+                        if args.save_best_by == "val_regret"
+                        else (
+                            float(best_validation_kl)
+                            if np.isfinite(best_validation_kl)
+                            else None
+                        )
+                    )
+                )
+            )
+            if best_validation_metrics is not None
+            else None
+        ),
         "best_validation_kl": (
             float(best_validation_kl)
             if np.isfinite(best_validation_kl)
@@ -669,14 +719,17 @@ def main() -> None:
         "final_student_distribution_entropy_mean": final_student_entropy_mean,
         "run_success": run_success,
         "wall_time_sec": float(time.time() - run_start),
+        "final_training_loss": final_train_kl,
         "approx_candidate_sequences_consumed": int(
-            int(args.max_steps) * int(args.batch_size) * int(train_n_candidates)
+            consumed_candidates
         ),
         "teacher_labels_used": int(
-            int(args.max_steps) * int(args.batch_size) * int(train_n_candidates)
+            consumed_candidates
         ),
         "validation_cache_used": str(eval_cache_path),
         "distilled_model_path": str(distilled_path) if run_success else None,
+        "saved_best_model_path": str(best_model_path) if best_state is not None else None,
+        "initialized_from_model_path": str(args.student_path),
         "inherited_compression": inherited,
     }
     save_json(out_dir / "distillation_report.json", report)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,7 +27,6 @@ from oawc.compression.operator_metrics import (
 from oawc.compression.reports import (
     count_parameters,
     model_size_bytes,
-    params_matching_substring,
     save_json,
 )
 from oawc.envs import ENV_SPECS
@@ -43,6 +43,49 @@ def _get_child(parent: nn.Module, child_name: str) -> nn.Module:
 
 def _set_child(parent: nn.Module, child_name: str, child: nn.Module) -> None:
     setattr(parent, child_name, child)
+
+
+def _parse_target_substrings(
+    target_substrings: str | None,
+    target_substring_legacy: str | None,
+) -> list[str]:
+    raw = target_substrings if target_substrings is not None else target_substring_legacy
+    if raw is None:
+        return ["predictor"]
+    values = [v.strip() for v in str(raw).split(",") if v.strip()]
+    return values or ["predictor"]
+
+
+def _name_matches_any(name: str, substrings: list[str]) -> bool:
+    return any(sub in name for sub in substrings)
+
+
+def _params_matching_any_substring(
+    model: nn.Module,
+    substrings: list[str],
+) -> int:
+    total = 0
+    for name, param in model.named_parameters():
+        if _name_matches_any(name, substrings):
+            total += int(param.numel())
+    return total
+
+
+def _infer_interface_mode(model: nn.Module) -> str:
+    if callable(getattr(model, "get_cost", None)) or callable(
+        getattr(model, "cost", None)
+    ):
+        return "cost_model_direct"
+    if callable(getattr(model, "forward", None)) and not (
+        callable(getattr(model, "encode", None))
+        and callable(getattr(model, "rollout", None))
+    ):
+        return "forward_only"
+    if callable(getattr(model, "encode", None)) and callable(
+        getattr(model, "rollout", None)
+    ):
+        return "representation_rollout_only"
+    return "no_planning_interface"
 
 
 def replace_module_by_path(
@@ -115,6 +158,11 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--rank-fraction", type=float, required=True)
     parser.add_argument("--target-substring", default="predictor")
+    parser.add_argument(
+        "--target-substrings",
+        default=None,
+        help="Comma-separated module substrings to compress.",
+    )
     parser.add_argument("--min-dim", type=int, default=64)
     parser.add_argument("--num-calib-states", type=int, default=64)
     parser.add_argument("--num-calib-candidates", type=int, default=64)
@@ -139,10 +187,6 @@ def main() -> None:
     parser.add_argument("--output-root", default="outputs/compression")
     args = parser.parse_args()
 
-    if args.model_family != "lewm_hf":
-        raise ValueError(
-            "Method 2 v0 currently supports --model-family lewm_hf."
-        )
     if args.calib_source != "random_candidates":
         raise ValueError(
             "Method 2 v0 currently supports "
@@ -153,7 +197,12 @@ def main() -> None:
             "--rank-fraction must be in (0,1) for compressive SVD."
         )
 
+    run_start = time.time()
     device = resolve_device(args.device)
+    target_substrings = _parse_target_substrings(
+        args.target_substrings,
+        args.target_substring,
+    )
     out_dir = Path(args.output_root) / args.env / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,7 +216,7 @@ def main() -> None:
     model.requires_grad_(False)
 
     total_before = count_parameters(model)
-    predictor_before = params_matching_substring(model, args.target_substring)
+    predictor_before = _params_matching_any_substring(model, target_substrings)
     size_before = model_size_bytes(model)
 
     module_by_name = dict(model.named_modules())
@@ -175,7 +224,7 @@ def main() -> None:
         name
         for name, module in model.named_modules()
         if isinstance(module, nn.Linear)
-        and args.target_substring in name
+        and _name_matches_any(name, target_substrings)
     ]
 
     # Collect calibration activations using forward pre-hooks.
@@ -445,7 +494,7 @@ def main() -> None:
         )
 
     total_after = count_parameters(model)
-    predictor_after = params_matching_substring(model, args.target_substring)
+    predictor_after = _params_matching_any_substring(model, target_substrings)
     size_after = model_size_bytes(model)
 
     # Save model on CPU for portability.
@@ -464,6 +513,7 @@ def main() -> None:
         "tag": args.tag,
         "rank_fraction": float(args.rank_fraction),
         "target_substring": args.target_substring,
+        "target_substrings": target_substrings,
         "min_dim": int(args.min_dim),
         "num_calib_states": int(args.num_calib_states),
         "num_calib_candidates": int(args.num_calib_candidates),
@@ -496,6 +546,22 @@ def main() -> None:
         "model_size_bytes_before": int(size_before),
         "model_size_bytes_after": int(size_after),
         "has_get_cost_after_compression": bool(hasattr(model, "get_cost")),
+        "interface_mode_after_compression": _infer_interface_mode(model),
+        "selected_modules": [
+            entry["name"]
+            for entry in module_report
+            if entry.get("status") in {"compressed", "fallback_weight_svd"}
+        ],
+        "skipped_modules": [
+            {
+                "name": entry["name"],
+                "reason_skipped": entry.get("skip_reason"),
+            }
+            for entry in module_report
+            if entry.get("status") == "skipped"
+        ],
+        "layers_compressed": int(num_compressed),
+        "wall_time_s": float(time.time() - run_start),
         "mean_relative_weight_error": (
             float(sum(weight_errors) / len(weight_errors))
             if weight_errors
