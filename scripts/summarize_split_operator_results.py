@@ -130,8 +130,9 @@ def _build_candidates(
             "AA-SVD r=0.5",
             "candidate",
             (
-                "AA-SVD r=0.5 is the strongest compressed baseline "
-                "by operator metrics."
+                "Held-out operator metrics are weak overall; include this "
+                "as a comparatively better compressed baseline for diagnostic "
+                "downstream checking."
             ),
         ),
         (
@@ -151,8 +152,9 @@ def _build_candidates(
             "SVD r=0.5 + hybrid split",
             "candidate",
             (
-                "Hybrid r=0.5 is the strongest operator-aware recovery from "
-                "naive SVD r=0.5."
+                "Operator-aware recovery appears limited under held-out "
+                "evaluation; include hybrid r=0.5 to test whether weak "
+                "operator metrics still track downstream behavior."
             ),
         ),
         (
@@ -416,14 +418,17 @@ def main() -> None:
                 "eval_cache_tag": args.eval_cache_tag,
                 "candidates": candidates,
                 "interpretation": [
-                    "AA-SVD r=0.5 is the strongest compressed baseline by "
-                    "operator metrics.",
-                    "Hybrid r=0.5 is the strongest operator-aware recovery "
-                    "from naive SVD r=0.5.",
+                    "Held-out operator metrics are weak across all tested "
+                    "compressed and distilled variants.",
+                    "Current candidate set should be treated as diagnostic, "
+                    "not confirmatory, for full environment benchmarking.",
+                    "Downstream benchmarks are used to test whether weak "
+                    "held-out operator metrics still correspond to useful "
+                    "behavioral differences.",
                     (
                         "AA-SVD r=0.25 + hybrid tests whether operator-aware "
-                        "recovery can improve stronger activation-aware "
-                        "compression."
+                        "recovery changes downstream behavior despite weak "
+                        "held-out operator metrics."
                     ),
                 ],
             },
