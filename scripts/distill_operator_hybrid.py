@@ -202,8 +202,16 @@ def _spearman(x: torch.Tensor, y: torch.Tensor) -> float:
     idx_y = torch.argsort(y)
     rx = torch.empty_like(idx_x, dtype=torch.float32)
     ry = torch.empty_like(idx_y, dtype=torch.float32)
-    rx[idx_x] = torch.arange(x.numel(), dtype=torch.float32)
-    ry[idx_y] = torch.arange(y.numel(), dtype=torch.float32)
+    rx[idx_x] = torch.arange(
+        x.numel(),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    ry[idx_y] = torch.arange(
+        y.numel(),
+        dtype=torch.float32,
+        device=y.device,
+    )
     rx = rx - rx.mean()
     ry = ry - ry.mean()
     denom = torch.sqrt((rx.pow(2).sum()) * (ry.pow(2).sum()))
@@ -252,16 +260,16 @@ def _operator_metrics(
     teacher_best = t_sorted[:, 0]
     student_best = s_sorted[:, 0]
     teacher_best_cost = teacher_costs[
-        torch.arange(teacher_costs.shape[0]),
+        torch.arange(teacher_costs.shape[0], device=teacher_costs.device),
         teacher_best,
     ]
     student_pick_teacher_cost = teacher_costs[
-        torch.arange(teacher_costs.shape[0]),
+        torch.arange(teacher_costs.shape[0], device=teacher_costs.device),
         student_best,
     ]
     regret = student_pick_teacher_cost - teacher_best_cost
     student_best_first_action = candidate_actions[
-        torch.arange(candidate_actions.shape[0]),
+        torch.arange(candidate_actions.shape[0], device=candidate_actions.device),
         student_best,
         0,
         :,
@@ -275,9 +283,15 @@ def _operator_metrics(
     return {
         "finite_student_costs": True,
         "student_cost_std": float(student_costs.std().item()),
-        "spearman_mean": float(torch.tensor(spearman).mean().item()),
-        "top5_overlap_mean": float(torch.tensor(overlaps5).mean().item()),
-        "top10_overlap_mean": float(torch.tensor(overlaps10).mean().item()),
+        "spearman_mean": float(
+            torch.tensor(spearman, device=teacher_costs.device).mean().item()
+        ),
+        "top5_overlap_mean": float(
+            torch.tensor(overlaps5, device=teacher_costs.device).mean().item()
+        ),
+        "top10_overlap_mean": float(
+            torch.tensor(overlaps10, device=teacher_costs.device).mean().item()
+        ),
         "teacher_regret_mean": float(regret.mean().item()),
         "first_action_error_mean": float(first_action_error.mean().item()),
         "teacher_best_index_match_rate": float(

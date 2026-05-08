@@ -130,8 +130,16 @@ def _spearman(x: torch.Tensor, y: torch.Tensor) -> float:
     idx_y = torch.argsort(y)
     rx = torch.empty_like(idx_x, dtype=torch.float32)
     ry = torch.empty_like(idx_y, dtype=torch.float32)
-    rx[idx_x] = torch.arange(x.numel(), dtype=torch.float32)
-    ry[idx_y] = torch.arange(y.numel(), dtype=torch.float32)
+    rx[idx_x] = torch.arange(
+        x.numel(),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    ry[idx_y] = torch.arange(
+        y.numel(),
+        dtype=torch.float32,
+        device=y.device,
+    )
     rx = rx - rx.mean()
     ry = ry - ry.mean()
     denom = torch.sqrt((rx.pow(2).sum()) * (ry.pow(2).sum()))
@@ -166,17 +174,22 @@ def _operator_metrics(
         s5 = set(s_sorted[i, :5].tolist())
         top5_overlap.append(len(t5.intersection(s5)) / 5.0)
         spearman.append(_spearman(teacher_costs[i], student_costs[i]))
-    top5_overlap_mean = float(torch.tensor(top5_overlap).mean().item())
-    spearman_mean = float(torch.tensor(spearman).mean().item())
+    metrics_device = teacher_costs.device
+    top5_overlap_mean = float(
+        torch.tensor(top5_overlap, device=metrics_device).mean().item()
+    )
+    spearman_mean = float(
+        torch.tensor(spearman, device=metrics_device).mean().item()
+    )
 
     teacher_best = t_sorted[:, 0]
     student_best = s_sorted[:, 0]
     teacher_best_cost = teacher_costs[
-        torch.arange(teacher_costs.shape[0]),
+        torch.arange(teacher_costs.shape[0], device=teacher_costs.device),
         teacher_best,
     ]
     student_pick_teacher_cost = teacher_costs[
-        torch.arange(teacher_costs.shape[0]),
+        torch.arange(teacher_costs.shape[0], device=teacher_costs.device),
         student_best,
     ]
     regret = student_pick_teacher_cost - teacher_best_cost

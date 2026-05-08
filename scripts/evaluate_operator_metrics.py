@@ -31,7 +31,11 @@ def _rankdata(x: torch.Tensor) -> torch.Tensor:
     # Ordinal ranks, deterministic for our almost-always continuous costs.
     idx = torch.argsort(x)
     ranks = torch.empty_like(idx, dtype=torch.float32)
-    ranks[idx] = torch.arange(x.numel(), dtype=torch.float32)
+    ranks[idx] = torch.arange(
+        x.numel(),
+        dtype=torch.float32,
+        device=x.device,
+    )
     return ranks
 
 
@@ -136,17 +140,17 @@ def main() -> None:
 
     student_best_index = student_sorted[:, 0]
     teacher_best_cost = teacher_costs[
-        torch.arange(teacher_costs.shape[0]),
+        torch.arange(teacher_costs.shape[0], device=teacher_costs.device),
         teacher_best_index,
     ]
     student_pick_teacher_cost = teacher_costs[
-        torch.arange(teacher_costs.shape[0]),
+        torch.arange(teacher_costs.shape[0], device=teacher_costs.device),
         student_best_index,
     ]
     teacher_regret = student_pick_teacher_cost - teacher_best_cost
 
     student_best_first_action = candidate_actions[
-        torch.arange(candidate_actions.shape[0]),
+        torch.arange(candidate_actions.shape[0], device=candidate_actions.device),
         student_best_index,
         0,
         :,
