@@ -202,6 +202,30 @@ def _crossed_exact_eval_path(
     batch_states: int,
     batch_candidates: int,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
+    # Exact-mode contract in crossed evaluator now mirrors
+    # evaluate_operator_metrics reference behavior.
+    info = build_info_dict_from_cache(
+        env_name=cache["env"],
+        episodes_idx=list(cache["episodes_idx"]),
+        start_steps=list(cache["start_steps"]),
+        goal_offset_steps=int(cache["goal_offset_steps"]),
+        device=device,
+    )
+    info = maybe_align_action_width(info, model)
+    candidate_actions_cpu = cache["candidate_actions"].float()
+    candidate_eval = adapt_candidates_for_model(
+        candidate_actions_cpu.to(device),
+        model,
+    )
+    expanded = expand_info_for_candidates(
+        info,
+        num_candidates=int(candidate_actions_cpu.shape[1]),
+    )
+    with torch.no_grad():
+        student_costs = compute_model_costs(model, expanded, candidate_eval)
+    student_costs_cpu = student_costs.detach().to("cpu").float()
+
+    # Keep a chunked probe for forensic visibility.
     info_cpu = build_info_dict_from_cache(
         env_name=cache["env"],
         episodes_idx=list(cache["episodes_idx"]),
@@ -210,8 +234,7 @@ def _crossed_exact_eval_path(
         device="cpu",
     )
     info_cpu = maybe_align_action_width(info_cpu, model)
-    candidate_actions_cpu = cache["candidate_actions"].float()
-    student_costs_cpu = _compute_student_costs_chunked(
+    chunked_probe = _compute_student_costs_chunked(
         model=model,
         info_cpu=info_cpu,
         candidate_actions_cpu=candidate_actions_cpu,
@@ -221,13 +244,11 @@ def _crossed_exact_eval_path(
     )
     metadata = {
         "candidate_actions_raw_shape": list(candidate_actions_cpu.shape),
-        "candidate_actions_eval_shape": list(
-            adapt_candidates_for_model(
-                candidate_actions_cpu[:1, :1].to(device),
-                model,
-            ).shape
-        ),
+        "candidate_actions_eval_shape": list(candidate_eval.shape),
         "student_costs_shape": list(student_costs_cpu.shape),
+        "chunked_probe_max_abs_diff_vs_exact": float(
+            (chunked_probe - student_costs_cpu).abs().max().item()
+        ),
     }
     return student_costs_cpu, metadata
 

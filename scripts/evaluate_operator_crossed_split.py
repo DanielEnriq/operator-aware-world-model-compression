@@ -54,16 +54,6 @@ class EvalCombo:
     teacher_best_first_action: torch.Tensor
 
 
-def _stats(x: torch.Tensor) -> dict[str, float]:
-    x = x.detach().float().reshape(-1)
-    return {
-        "min": float(x.min().item()),
-        "mean": float(x.mean().item()),
-        "max": float(x.max().item()),
-        "std": float(x.std().item()),
-    }
-
-
 def _sample_candidates(
     *,
     num_states: int,
@@ -241,6 +231,46 @@ def _compute_metrics(
             (student_best == teacher_best_index_cpu).float().mean().item()
         ),
     }
+
+
+def _compute_student_costs_reference(
+    *,
+    model: torch.nn.Module,
+    cache_payload: dict[str, Any],
+    device: str,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Reference path: mirror evaluate_operator_metrics exactly."""
+    info_dict = build_info_dict_from_cache(
+        env_name=cache_payload["env"],
+        episodes_idx=list(cache_payload["episodes_idx"]),
+        start_steps=list(cache_payload["start_steps"]),
+        goal_offset_steps=int(cache_payload["goal_offset_steps"]),
+        device=device,
+    )
+    info_dict = maybe_align_action_width(info_dict, model)
+    candidate_actions_cpu = cache_payload["candidate_actions"].float()
+    candidate_eval = adapt_candidates_for_model(
+        candidate_actions_cpu.to(device),
+        model,
+    )
+    expanded_info = expand_info_for_candidates(
+        info_dict,
+        num_candidates=int(candidate_actions_cpu.shape[1]),
+    )
+    with torch.no_grad():
+        student_costs = compute_model_costs(
+            model,
+            expanded_info,
+            candidate_eval,
+        )
+    return (
+        student_costs.detach().to("cpu").float(),
+        {
+            "candidate_actions_raw_shape": list(candidate_actions_cpu.shape),
+            "candidate_actions_eval_shape": list(candidate_eval.shape),
+            "student_costs_shape": list(student_costs.shape),
+        },
+    )
 
 
 def _resolve_model_path(tag: str, compression_root: Path) -> Path | None:
@@ -510,6 +540,11 @@ def main() -> None:
         "--empty-cache-between-batches",
         action="store_true",
     )
+    parser.add_argument(
+        "--debug-assert-exact-consistency",
+        action="store_true",
+    )
+    parser.add_argument("--debug-atol", type=float, default=1e-3)
     args = parser.parse_args()
 
     device = resolve_device(args.device)
@@ -542,9 +577,11 @@ def main() -> None:
         batch_candidates=int(args.batch_candidates),
         empty_cache_between_batches=bool(args.empty_cache_between_batches),
     )
+    cache_by_split = {"train": train_cache, "eval": eval_cache}
 
     compression_root = Path("outputs/compression") / args.env
     rows: list[dict[str, Any]] = []
+    debug_rows: list[dict[str, Any]] = []
     for tag in args.model_tags:
         model_path = _resolve_model_path(tag, compression_root)
         if model_path is None:
@@ -573,24 +610,95 @@ def main() -> None:
         model = model.to(device).eval()
         model.requires_grad_(False)
         for combo in combos:
-            info_cpu = maybe_align_action_width(dict(combo.info_cpu), model)
-            student_costs = _compute_costs_chunked(
-                model=model,
-                info_cpu=info_cpu,
-                candidate_actions_cpu=combo.candidate_actions_cpu,
-                device=device,
-                batch_states=int(args.batch_states),
-                batch_candidates=int(args.batch_candidates),
-                empty_cache_between_batches=bool(
-                    args.empty_cache_between_batches
-                ),
-            )
+            if combo.candidate_mode == "exact":
+                exact_cache = cache_by_split[combo.state_split]
+                candidate_actions = exact_cache.payload["candidate_actions"].float()
+                teacher_costs = exact_cache.payload["teacher_costs"].float()
+                teacher_best_index = exact_cache.payload["teacher_best_index"].long()
+                teacher_best_first_action = (
+                    exact_cache.payload["teacher_best_first_action"].float()
+                )
+                student_costs, ref_meta = _compute_student_costs_reference(
+                    model=model,
+                    cache_payload=exact_cache.payload,
+                    device=device,
+                )
+                if args.debug_assert_exact_consistency:
+                    info_cpu = maybe_align_action_width(dict(combo.info_cpu), model)
+                    chunked_costs = _compute_costs_chunked(
+                        model=model,
+                        info_cpu=info_cpu,
+                        candidate_actions_cpu=combo.candidate_actions_cpu,
+                        device=device,
+                        batch_states=int(args.batch_states),
+                        batch_candidates=int(args.batch_candidates),
+                        empty_cache_between_batches=bool(
+                            args.empty_cache_between_batches
+                        ),
+                    )
+                    candidate_equal = bool(
+                        torch.equal(candidate_actions, combo.candidate_actions_cpu)
+                    )
+                    teacher_equal = bool(
+                        torch.equal(teacher_costs, combo.teacher_costs_cpu)
+                    )
+                    student_allclose = bool(
+                        torch.allclose(
+                            student_costs,
+                            chunked_costs,
+                            atol=float(args.debug_atol),
+                            rtol=0.0,
+                        )
+                    )
+                    max_abs_diff = float(
+                        (student_costs - chunked_costs).abs().max().item()
+                    )
+                    debug_rows.append(
+                        {
+                            "model_tag": tag,
+                            "state_split": combo.state_split,
+                            "candidate_split": combo.candidate_split,
+                            "candidate_mode": combo.candidate_mode,
+                            "candidate_equal_to_cache": candidate_equal,
+                            "teacher_equal_to_cache": teacher_equal,
+                            "student_ref_vs_chunked_allclose": student_allclose,
+                            "student_ref_vs_chunked_max_abs_diff": max_abs_diff,
+                            "reference_shapes": ref_meta,
+                        }
+                    )
+                    if not (candidate_equal and teacher_equal and student_allclose):
+                        raise RuntimeError(
+                            "Exact-mode consistency assertion failed for "
+                            f"{tag} [{combo.state_split}/{combo.candidate_split}] "
+                            f"(candidate_equal={candidate_equal}, "
+                            f"teacher_equal={teacher_equal}, "
+                            f"student_allclose={student_allclose}, "
+                            f"max_abs_diff={max_abs_diff})."
+                        )
+            else:
+                candidate_actions = combo.candidate_actions_cpu
+                teacher_costs = combo.teacher_costs_cpu
+                teacher_best_index = combo.teacher_best_index
+                teacher_best_first_action = combo.teacher_best_first_action
+                info_cpu = maybe_align_action_width(dict(combo.info_cpu), model)
+                student_costs = _compute_costs_chunked(
+                    model=model,
+                    info_cpu=info_cpu,
+                    candidate_actions_cpu=candidate_actions,
+                    device=device,
+                    batch_states=int(args.batch_states),
+                    batch_candidates=int(args.batch_candidates),
+                    empty_cache_between_batches=bool(
+                        args.empty_cache_between_batches
+                    ),
+                )
+
             metrics = _compute_metrics(
-                teacher_costs_cpu=combo.teacher_costs_cpu,
+                teacher_costs_cpu=teacher_costs,
                 student_costs_cpu=student_costs,
-                candidate_actions_cpu=combo.candidate_actions_cpu,
-                teacher_best_index_cpu=combo.teacher_best_index,
-                teacher_best_first_action_cpu=combo.teacher_best_first_action,
+                candidate_actions_cpu=candidate_actions,
+                teacher_best_index_cpu=teacher_best_index,
+                teacher_best_first_action_cpu=teacher_best_first_action,
             )
             rows.append(
                 {
@@ -641,6 +749,7 @@ def main() -> None:
             "teacher_family": teacher_family,
             "teacher_checkpoint": teacher_checkpoint,
             "rows": rows,
+            "debug_exact_consistency": debug_rows,
         },
     )
     _write_md(md_path, rows)
